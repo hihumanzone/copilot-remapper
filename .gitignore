@@ -1,0 +1,18 @@
+# Build output
+CopilotRemapper.exe
+*.exe
+*.dll
+*.pdb
+
+# Local runtime configuration (machine-specific, written by the app)
+copilot_config.json
+
+# OS / editor cruft
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo

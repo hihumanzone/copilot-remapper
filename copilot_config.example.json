@@ -1,0 +1,9 @@
+{
+  "ActionType": "LaunchApp",
+  "TargetPath": "wt.exe",
+  "Arguments": "",
+  "WorkingDirectory": "",
+  "RunAsAdmin": false,
+  "StartWithWindows": false,
+  "DebounceMs": 300
+}

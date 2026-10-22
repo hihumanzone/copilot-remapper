@@ -27,3 +27,6 @@
 #define WM_APP_TRAY_CALLBACK       (WM_APP + 1)
 #define WM_APP_COPILOT_PRESSED     (WM_APP + 2)
 #define WM_APP_WAKEUP              (WM_APP + 3)
+
+// Timer IDs
+#define IDT_TRAY_RETRY             3001

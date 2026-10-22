@@ -21,6 +21,7 @@
 
 static SettingsWindow* g_pSettingsWindow = nullptr;
 static TrayIcon* g_pTrayIcon = nullptr;
+static UINT g_uMsgTaskbarCreated = 0;
 
 static void SetupConsoleOutput() {
     HANDLE hExistingOut = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -78,12 +79,26 @@ static void EnableHighDpi() {
 }
 
 static LRESULT CALLBACK MessageWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    if (g_uMsgTaskbarCreated != 0 && uMsg == g_uMsgTaskbarCreated) {
+        if (g_pTrayIcon) {
+            g_pTrayIcon->OnTaskbarCreated();
+        }
+        return 0;
+    }
+
     switch (uMsg) {
     case WM_APP_TRAY_CALLBACK:
         if (g_pTrayIcon) {
             g_pTrayIcon->HandleMessage(wParam, lParam);
         }
         return 0;
+
+    case WM_TIMER:
+        if (wParam == IDT_TRAY_RETRY && g_pTrayIcon) {
+            g_pTrayIcon->OnRetryTimer();
+            return 0;
+        }
+        break;
 
     case WM_APP_COPILOT_PRESSED:
         if (g_pSettingsWindow) {
@@ -94,6 +109,9 @@ static LRESULT CALLBACK MessageWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
     case WM_APP_WAKEUP:
         if (g_pSettingsWindow) {
             g_pSettingsWindow->Wakeup();
+        }
+        if (g_pTrayIcon) {
+            g_pTrayIcon->EnsureAdded();
         }
         return 0;
 
@@ -114,6 +132,7 @@ static LRESULT CALLBACK MessageWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
     default:
         return DefWindowProcW(hwnd, uMsg, wParam, lParam);
     }
+    return DefWindowProcW(hwnd, uMsg, wParam, lParam);
 }
 
 static bool IsCurrentProcessElevated() {
@@ -199,6 +218,25 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int nCmdSh
     RegisterClassExW(&wc);
 
     HWND hMsgWnd = CreateWindowExW(0, CLASS_NAME, L"CopilotRemapperMessageWindow", 0, 0, 0, 0, 0, nullptr, nullptr, hInstance, nullptr);
+
+    g_uMsgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+
+    // Allow TaskbarCreated and WM_APP_TRAY_CALLBACK across UIPI integrity boundaries (Explorer is Medium IL, we are High IL)
+    typedef BOOL(WINAPI* pfnChangeWindowMessageFilterEx)(HWND, UINT, DWORD, void*);
+    typedef BOOL(WINAPI* pfnChangeWindowMessageFilter)(UINT, DWORD);
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (hUser32) {
+        auto pChangeFilterEx = reinterpret_cast<pfnChangeWindowMessageFilterEx>(GetProcAddress(hUser32, "ChangeWindowMessageFilterEx"));
+        if (pChangeFilterEx) {
+            pChangeFilterEx(hMsgWnd, g_uMsgTaskbarCreated, 1 /* MSGFLT_ALLOW */, nullptr);
+            pChangeFilterEx(hMsgWnd, WM_APP_TRAY_CALLBACK, 1 /* MSGFLT_ALLOW */, nullptr);
+        }
+        auto pChangeFilter = reinterpret_cast<pfnChangeWindowMessageFilter>(GetProcAddress(hUser32, "ChangeWindowMessageFilter"));
+        if (pChangeFilter) {
+            pChangeFilter(g_uMsgTaskbarCreated, 1 /* MSGFLT_ADD */);
+            pChangeFilter(WM_APP_TRAY_CALLBACK, 1 /* MSGFLT_ADD */);
+        }
+    }
 
     SettingsWindow settingsWindow;
     g_pSettingsWindow = &settingsWindow;

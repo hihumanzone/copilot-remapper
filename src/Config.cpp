@@ -239,8 +239,55 @@ void ConfigManager::SetStartup(bool enable) {
     if (enable) {
         wchar_t exePath[MAX_PATH];
         if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) > 0) {
-            std::wstring schCmd = L"schtasks.exe /Create /TN \"CopilotRemapper\" /TR \"'" + std::wstring(exePath) + L"' --silent\" /SC ONLOGON /RL HIGHEST /F";
-            RunProcessSilently(schCmd);
+            std::wstring xmlPath = GetAppDirectory() + L"\\copilot_task.xml";
+            std::string xmlContent =
+                "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n"
+                "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n"
+                "  <RegistrationInfo>\n"
+                "    <Author>CopilotRemapper</Author>\n"
+                "    <Description>Launches Copilot Remapper silently on user logon with administrator privileges</Description>\n"
+                "  </RegistrationInfo>\n"
+                "  <Principals>\n"
+                "    <Principal id=\"Author\">\n"
+                "      <LogonType>InteractiveToken</LogonType>\n"
+                "      <RunLevel>HighestAvailable</RunLevel>\n"
+                "    </Principal>\n"
+                "  </Principals>\n"
+                "  <Settings>\n"
+                "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n"
+                "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n"
+                "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n"
+                "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n"
+                "  </Settings>\n"
+                "  <Triggers>\n"
+                "    <LogonTrigger />\n"
+                "  </Triggers>\n"
+                "  <Actions Context=\"Author\">\n"
+                "    <Exec>\n"
+                "      <Command>" + WideToUtf8(exePath) + "</Command>\n"
+                "      <Arguments>--silent</Arguments>\n"
+                "    </Exec>\n"
+                "  </Actions>\n"
+                "</Task>\n";
+
+            bool xmlRegistered = false;
+            std::ofstream xmlFile(xmlPath.c_str(), std::ios::binary | std::ios::trunc);
+            if (xmlFile.is_open()) {
+                xmlFile.write(xmlContent.data(), xmlContent.size());
+                xmlFile.close();
+
+                DWORD exitCode = 1;
+                std::wstring xmlCmd = L"schtasks.exe /Create /TN \"CopilotRemapper\" /XML \"" + xmlPath + L"\" /F";
+                if (RunProcessSilently(xmlCmd, &exitCode) && exitCode == 0) {
+                    xmlRegistered = true;
+                }
+                DeleteFileW(xmlPath.c_str());
+            }
+
+            if (!xmlRegistered) {
+                std::wstring schCmd = L"schtasks.exe /Create /TN \"CopilotRemapper\" /TR \"'" + std::wstring(exePath) + L"' --silent\" /SC ONLOGON /RL HIGHEST /F";
+                RunProcessSilently(schCmd);
+            }
         }
     } else {
         std::wstring schCmd = L"schtasks.exe /Delete /TN \"CopilotRemapper\" /F";

@@ -3,9 +3,13 @@ CopilotRemapper.exe
 *.exe
 *.dll
 *.pdb
+*.log
 
 # Local runtime configuration (machine-specific, written by the app)
 copilot_config.json
+
+# Local compiler / tools
+.tools/
 
 # OS / editor cruft
 Thumbs.db

@@ -1,6 +1,6 @@
 # Copilot Key Remapper ⌨✨
 
-A lightweight, high-performance native Windows utility written entirely from scratch to repurpose the dedicated laptop **Copilot key** into any custom action (launch programs, execute shell commands, open web applications, or trigger alternative keystrokes).
+A lightweight, high-performance native Windows utility written in **modern C++ (C++17)** from scratch to repurpose the dedicated laptop **Copilot key** into any custom action (launch programs, execute shell commands, open web applications, or trigger alternative keystrokes).
 
 ---
 
@@ -19,24 +19,29 @@ Because legacy physical keyboards only have keys up to `F12`, Microsoft utilized
   * **Our Solution**: Upon detecting `VK_F23`, our hook immediately injects an unassigned virtual key mask (`0xE8` / `VK_UNASSIGNED_E8`). This signals Windows Explorer that a multi-key combo occurred, cleanly suppressing the Start Menu without side effects.
 * **Hardware Modifier Release**: Before executing an action or sending a simulated key (like `Right Ctrl`), the hook logically lifts `LWin` and `LShift`. This guarantees target applications don't inherit lingering modifier keys.
 * **True Press & Hold for Modifiers**: When remapped to `Right Ctrl` or `Context Menu`, the hook sends `KeyDown` on Copilot press and `KeyUp` on Copilot release. You can use it as a true modifier (e.g. `Copilot + C`, `Copilot + V`)!
-* **Zero-Latency Dispatch**: Low-level keyboard hooks (`WH_KEYBOARD_LL`) run synchronously on the Windows message thread. Our hook consumes the event, injects the mask, and offloads action execution to a background `ThreadPool` worker in under **0.1 milliseconds**, ensuring zero system keyboard lag.
+* **Smart Window Activation & UAC Avoidance**:
+  * **Already in Foreground**: If the target application is already focused, pressing the Copilot key does nothing—preventing duplicate launches, window flickers, or unassigned Settings popups.
+  * **Running in Background**: If the target application is already running, the remapper immediately brings its existing window to the foreground, restores it from minimized state, and bypasses Windows focus-stealing locks (`AttachThreadInput` & `AllowSetForegroundWindow`).
+  * **UAC Avoidance**: If the target application is already running with administrator privileges, the existing elevated instance is brought to focus directly with **zero additional UAC prompts**. A UAC confirmation is only displayed if no elevated instance exists yet.
+* **Zero-Latency Dispatch**: Low-level keyboard hooks (`WH_KEYBOARD_LL`) run synchronously on the Windows message thread. Our hook consumes the event, injects the mask, and offloads action execution to an asynchronous background worker thread in under **0.05 milliseconds**, ensuring zero system keyboard lag.
 * **Debouncing**: A configurable debounce timer (default $300\text{ ms}$) prevents hardware auto-repeat from launching multiple instances when holding down the key.
 
 ---
 
 ## 🚀 Key Features
 
-* **Zero External Dependencies**: Compiles into a single standalone binary of under **30 KB** using Windows native C# compiler. Consumes **<15 MB RAM** and **0% CPU** while idle.
-* **100% Native Windows UI**: Built with standard Windows Common Controls (`ComCtl32.dll` v6.0), `FlatStyle.System`, and native layout containers with zero third-party UI libraries.
-* **High-DPI PerMonitorV2 Aware**: Crisp, sharp text and layout across any monitor DPI scaling via `app.manifest`.
+* **100% Native C++ (C++17)**: Fully migrated from C# to modern native C++ with zero runtime framework dependencies (no .NET runtime, no external DLLs). Statically linked into a single standalone binary.
+* **Ultra-Low Resource Footprint**: Consumes **<4 MB RAM** and **0% CPU** while idle.
+* **100% Native Windows UI**: Built with standard Windows Common Controls (`ComCtl32.dll` v6.0), Win32 dialogs, and native layout containers with zero third-party UI libraries.
+* **High-DPI PerMonitorV2 Aware**: Crisp, sharp text and layout across any monitor DPI scaling via `app.manifest` and `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`.
 * **DWM System Theming**: Automatically detects Windows Light/Dark mode and activates `DWMWA_USE_IMMERSIVE_DARK_MODE` on the title bar, reacting dynamically to system theme changes.
-* **Single-Instance IPC**: Double-clicking `CopilotRemapper.exe` while running smoothly brings the existing Settings window to the foreground via OS kernel `EventWaitHandle`.
+* **Single-Instance IPC**: Double-clicking `CopilotRemapper.exe` while running smoothly brings the existing Settings window to the foreground via OS kernel `CreateMutexW` and `CreateEventW`.
 * **Portable Mode with Fallback**: Saves configuration locally if writable, or safely falls back to `%APPDATA%\CopilotRemapper\` when running in protected directories.
 * **Customizable Actions**:
   * **Launch Application**: Select any `.exe`, `.bat`, `.cmd`, `.ps1`, `.lnk`, or file with optional arguments and working directory.
   * **Run Command / Script**: Execute PowerShell commands seamlessly in the background.
   * **Open Webpage / URL**: Instant one-key access to any URL (e.g., `https://claude.ai`, `https://chatgpt.com`).
-* **Live Hardware Status Bar**: Native `StatusStrip` reports timestamped confirmation when the physical Copilot key is pressed.
+* **Live Hardware Status Bar**: Native status bar reports timestamped confirmation when the physical Copilot key is pressed.
 * **Windows Auto-Start**: One-click toggle in Settings to automatically launch silently on user login.
 * **Python Alternative Included**: Includes `copilot_remapper.py` for Python users, requiring zero external `pip` packages.
 
@@ -47,22 +52,39 @@ Because legacy physical keyboards only have keys up to `F12`, Microsoft utilized
 ```
 copilot-remapper/
 │
-├── .gitignore              # Ignores build output + local config
-├── CopilotRemapper.exe     # Standalone native Windows executable (27 KB, build output)
-├── Program.cs              # Full C# source code with Win32 hook, IPC, and GUI
+├── .gitignore              # Ignores build output, local config, and compiler tools
+├── CMakeLists.txt          # Standard CMake build script (MSVC / GCC / Clang)
+├── CopilotRemapper.exe     # Standalone native Windows executable (build output)
 ├── app.manifest            # PerMonitorV2 High-DPI application manifest
-├── build.bat               # 1-click build script using native Windows csc.exe
+├── build.bat               # 1-click batch build script (auto-detects / bootstraps compiler)
 ├── build.ps1               # PowerShell build script alternative
 ├── copilot_config.json     # Your live config (git-ignored, created on first run)
 ├── copilot_config.example.json  # Sample config to copy if you want to start manually
 ├── copilot_remapper.py     # Pure Python implementation (using ctypes)
-└── README.md               # Documentation and technical guide
+├── resource.h              # Resource identifier constants
+├── resource.rc             # Win32 resource script (manifest, dialog, version info)
+│
+└── src/
+    ├── ActionRunner.cpp    # Action execution, Start Menu mask, modifier release
+    ├── ActionRunner.hpp
+    ├── Config.cpp          # Config management, zero-dep JSON engine, Task Scheduler auto-start
+    ├── Config.hpp
+    ├── IconHelper.cpp      # Dynamic GDI+ icon generator (rounded blue square + white 'C')
+    ├── IconHelper.hpp
+    ├── KeyboardHook.cpp    # Low-level keyboard hook (WH_KEYBOARD_LL), F23 interceptor
+    ├── KeyboardHook.hpp
+    ├── ProcessManager.cpp  # Process enumeration, window activation, elevation detection
+    ├── ProcessManager.hpp
+    ├── SettingsWindow.cpp  # Win32 Settings dialog, ComCtl32, dark theme, live status feedback
+    ├── SettingsWindow.hpp
+    ├── SingleInstance.cpp  # Named Mutex & Named Event IPC listener
+    ├── SingleInstance.hpp
+    ├── Theme.cpp           # DWM Immersive Dark Mode & theme change handler
+    ├── Theme.hpp
+    ├── TrayIcon.cpp        # System tray notification icon & context menu
+    ├── TrayIcon.hpp
+    └── main.cpp            # Application entry point, CLI arguments, message loop
 ```
-
-> **Note:** `CopilotRemapper.exe` and `copilot_config.json` are not tracked in git.
-> The executable is generated by `build.bat` / `build.ps1`, and the config is
-> machine-specific. Run the build script to produce the binary, then launch it
-> once to generate your own `copilot_config.json`.
 
 ---
 
@@ -91,51 +113,37 @@ The **Settings** window will open:
 | Flag | Description |
 | :--- | :--- |
 | `CopilotRemapper.exe` | Launches app and opens Settings GUI |
-| `CopilotRemapper.exe --silent` | Starts directly minimized in system tray (used by Windows startup) |
-| `CopilotRemapper.exe --test` | Performs a self-test of config loading and exits |
-| `CopilotRemapper.exe --install-startup` | Registers Windows startup registry key and exits |
-| `CopilotRemapper.exe --uninstall-startup` | Removes Windows startup registry key and exits |
+| `CopilotRemapper.exe --silent` (or `-s`) | Starts directly minimized in system tray (used by Windows startup) |
+| `CopilotRemapper.exe --test` (or `-t`) | Performs a self-test of config loading and exits |
+| `CopilotRemapper.exe --install-startup` | Registers silent elevated logon task via Windows Task Scheduler |
+| `CopilotRemapper.exe --uninstall-startup` | Removes logon task from Windows Task Scheduler |
 
 ---
 
-### 3. Python Alternative
+### 3. Recompiling from Source
 
-If you prefer running via Python (Python 3.8+ on Windows):
+You can build `CopilotRemapper.exe` using any standard Windows C++ compiler:
 
-```powershell
-# Run interactively
-python copilot_remapper.py
-
-# Check current configuration
-python copilot_remapper.py --status
-
-# Test action
-python copilot_remapper.py --test
-
-# Run silently in background without a console window
-pythonw copilot_remapper.py
-```
-
----
-
-### 4. Recompiling from Source
-
-No Visual Studio or external SDK required. Windows includes the C# compiler (`csc.exe`) natively:
-
+#### Option A: 1-Click Build (Batch or PowerShell)
 Simply double-click **`build.bat`** or run in PowerShell:
 ```powershell
 .\build.ps1
 ```
-It recompiles `CopilotRemapper.exe` in under 2 seconds.
+The build script automatically detects installed compilers (`g++`, `cl.exe`, `clang++`). If no C++ compiler is found in your `PATH`, it automatically fetches and unpacks **w64devkit** (a lightweight ~45 MB standalone GCC toolchain) into `.tools\` using built-in Windows tools, requiring zero manual configuration or administrator rights.
+
+#### Option B: CMake Build
+```powershell
+mkdir build
+cd build
+cmake ..
+cmake --build . --config Release
+```
 
 ---
 
 ## ⚙ Configuration (`copilot_config.json`)
 
-Settings are stored in JSON format and can be modified via the Settings GUI or a
-text editor. The file is created automatically on first run. To bootstrap it
-manually, copy `copilot_config.example.json` to `copilot_config.json` and edit
-it to taste:
+Settings are stored in JSON format and can be modified via the Settings GUI or a text editor. The file is created automatically on first run. To bootstrap it manually, copy `copilot_config.example.json` to `copilot_config.json`:
 
 ```json
 {
@@ -145,7 +153,6 @@ it to taste:
   "WorkingDirectory": "",
   "RunAsAdmin": false,
   "StartWithWindows": true,
-  "ShowNotifications": false,
   "DebounceMs": 300
 }
 ```

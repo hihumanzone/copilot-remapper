@@ -1,0 +1,76 @@
+#include <windows.h>
+#include <commctrl.h>
+#include "resource.h"
+
+// Embed high-DPI PerMonitorV2 & Common Controls v6 manifest
+1 24 "app.manifest"
+
+// Tray Context Menu
+IDR_TRAY_MENU MENU
+BEGIN
+    POPUP "Tray"
+    BEGIN
+        MENUITEM "Settings",         IDM_TRAY_SETTINGS
+        MENUITEM SEPARATOR
+        MENUITEM "Exit",             IDM_TRAY_EXIT
+    END
+END
+
+// Settings Dialog Template
+IDD_SETTINGS_DIALOG DIALOGEX 0, 0, 320, 204
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+CAPTION "Copilot Key Remapper"
+FONT 9, "Segoe UI", 400, 0, 0x0
+BEGIN
+    // Group 1: Key Action (X=10, Y=8, W=300, H=101)
+    GROUPBOX        "Key Action", IDC_GROUP_ACTION, 10, 8, 300, 101
+    LTEXT           "Remap Copilot key to:", IDC_LBL_ACTION, 20, 20, 280, 9
+    COMBOBOX        IDC_COMBO_ACTION, 20, 31, 280, 100, CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Application or file to open:", IDC_LBL_TARGET, 20, 48, 280, 9
+    EDITTEXT        IDC_EDIT_TARGET, 20, 59, 224, 12, ES_MULTILINE | ES_AUTOHSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Browse...", IDC_BTN_BROWSE, 248, 59, 52, 12, WS_TABSTOP
+    LTEXT           "Arguments (optional):", IDC_LBL_ARGS, 20, 75, 280, 9
+    EDITTEXT        IDC_EDIT_ARGS, 20, 86, 280, 12, ES_MULTILINE | ES_AUTOHSCROLL | WS_TABSTOP
+
+    // Group 2: Options (X=10, Y=115, W=300, H=44)
+    GROUPBOX        "Options", IDC_GROUP_OPTIONS, 10, 115, 300, 44
+    CONTROL         "Start automatically when Windows starts", IDC_CHECK_STARTUP, "Button", BS_AUTOCHECKBOX | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 20, 127, 280, 12
+    CONTROL         "Run with administrator privileges", IDC_CHECK_ADMIN, "Button", BS_AUTOCHECKBOX | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 20, 141, 280, 12
+
+    // Buttons Bar (Y=167, H=14)
+    PUSHBUTTON      "Test", IDC_BTN_TEST, 10, 167, 50, 14, WS_TABSTOP
+    DEFPUSHBUTTON   "Save", IDOK, 206, 167, 50, 14, WS_TABSTOP
+    PUSHBUTTON      "Close", IDCANCEL, 260, 167, 50, 14, WS_TABSTOP
+
+    // Status Text (Y=188, clean borderless static text)
+    LTEXT           "Ready. Press your physical Copilot key to test.", IDC_STATUSBAR, 10, 188, 300, 10, SS_LEFT
+END
+
+// Version Information
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "FileDescription",  "Copilot Key Remapper"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "CopilotRemapper"
+            VALUE "LegalCopyright",   "Open Source"
+            VALUE "OriginalFilename", "CopilotRemapper.exe"
+            VALUE "ProductName",      "Copilot Key Remapper"
+            VALUE "ProductVersion",   "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

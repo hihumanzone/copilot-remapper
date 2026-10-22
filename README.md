@@ -2,6 +2,10 @@
 
 A lightweight, high-performance native Windows utility written in **modern C++ (C++17)** from scratch to repurpose the dedicated laptop **Copilot key** into any custom action (launch programs, execute shell commands, open web applications, or trigger alternative keystrokes).
 
+<p align="center">
+  <img src="assets/settings_ui.png" alt="Copilot Key Remapper Settings UI (Windows 11 Dark Mode)" width="580" />
+</p>
+
 ---
 
 ## 🔍 How It Works Under the Hood
@@ -31,7 +35,9 @@ Because legacy physical keyboards only have keys up to `F12`, Microsoft utilized
 ## 🚀 Key Features
 
 * **100% Native C++ (C++17)**: Fully migrated from C# to modern native C++ with zero runtime framework dependencies (no .NET runtime, no external DLLs). Statically linked into a single standalone binary.
-* **Ultra-Low Resource Footprint**: Consumes **<1 MB RAM (typically ~600 KB)** and **0% CPU** while idle.
+* **Ultra-Low Resource Footprint**: Consumes **<1 MB RAM (typically ~0.1 MB - 0.7 MB)** and **0% CPU** while idle in the background:
+  <br>
+  <img src="assets/task_manager_footprint.png" alt="Copilot Key Remapper Running at 0% CPU and 0.1 MB RAM in Task Manager" width="700" />
 * **Featherweight Executable**: Compact standalone binary of only **~230 KB** with Link-Time dead code stripping and zero external runtime frameworks.
 * **100% Native Windows UI**: Built with standard Windows Common Controls (`ComCtl32.dll` v6.0), Win32 dialogs, and native layout containers with zero third-party UI libraries.
 * **High-DPI PerMonitorV2 Aware**: Crisp, sharp text and layout across any monitor DPI scaling via `app.manifest` and `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`.
@@ -53,6 +59,9 @@ Because legacy physical keyboards only have keys up to `F12`, Microsoft utilized
 ```
 copilot-remapper/
 │
+├── assets/                 # Repository visual assets and UI screenshots
+│   ├── settings_ui.png
+│   └── task_manager_footprint.png
 ├── .gitignore              # Ignores build output, local config, and compiler tools
 ├── CMakeLists.txt          # Standard CMake build script (MSVC / GCC / Clang)
 ├── CopilotRemapper.exe     # Standalone native Windows executable (build output)

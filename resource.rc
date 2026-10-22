@@ -5,6 +5,9 @@
 // Embed high-DPI PerMonitorV2 & Common Controls v6 manifest
 1 24 "app.manifest"
 
+// Application Icon
+IDI_APP_ICON ICON "app.ico"
+
 // Tray Context Menu
 IDR_TRAY_MENU MENU
 BEGIN

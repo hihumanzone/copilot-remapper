@@ -25,7 +25,6 @@ target_include_directories(CopilotRemapper PRIVATE src .)
 target_link_libraries(CopilotRemapper PRIVATE
     user32
     gdi32
-    gdiplus
     shell32
     comctl32
     dwmapi
@@ -36,8 +35,9 @@ target_link_libraries(CopilotRemapper PRIVATE
 )
 
 if(MSVC)
-    target_compile_options(CopilotRemapper PRIVATE /W4 /O2 /EHsc)
+    target_compile_options(CopilotRemapper PRIVATE /W4 /O2 /GL /Gy /Gw /EHsc /DNDEBUG)
+    target_link_options(CopilotRemapper PRIVATE /LTCG /OPT:REF /OPT:ICF)
 else()
-    target_compile_options(CopilotRemapper PRIVATE -Wall -Wextra -O3)
-    target_link_options(CopilotRemapper PRIVATE -mwindows -static -s)
+    target_compile_options(CopilotRemapper PRIVATE -Wall -Wextra -O3 -ffunction-sections -fdata-sections -DNDEBUG)
+    target_link_options(CopilotRemapper PRIVATE -mwindows -static -s -Wl,--gc-sections)
 endif()

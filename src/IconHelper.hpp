@@ -10,5 +10,5 @@ public:
 
 private:
     static HICON s_appIcon;
-    static ULONG_PTR s_gdiplusToken;
+    static bool s_isCustomCreated;
 };

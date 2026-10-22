@@ -33,6 +33,8 @@ void SettingsWindow::Show() {
 void SettingsWindow::Hide() {
     if (m_hwnd && IsWindow(m_hwnd)) {
         ShowWindow(m_hwnd, SW_HIDE);
+        // Trim working set pages to standby list when minimized to tray
+        SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
     }
 }
 
@@ -72,7 +74,7 @@ static void CenterEditText(HWND hEdit) {
     SendMessageW(hEdit, EM_SETRECT, 0, reinterpret_cast<LPARAM>(&rc));
 }
 
-LRESULT CALLBACK SettingsWindow::GroupBoxSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+LRESULT CALLBACK SettingsWindow::GroupBoxSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/) {
     if (uMsg == WM_PAINT && Theme::IsSystemDarkMode()) {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
@@ -107,7 +109,7 @@ LRESULT CALLBACK SettingsWindow::GroupBoxSubclassProc(HWND hwnd, UINT uMsg, WPAR
     return DefSubclassProc(hwnd, uMsg, wParam, lParam);
 }
 
-LRESULT CALLBACK SettingsWindow::EditSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+LRESULT CALLBACK SettingsWindow::EditSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/) {
     switch (uMsg) {
     case WM_NCPAINT: {
         if (Theme::IsSystemDarkMode()) {
@@ -117,15 +119,13 @@ LRESULT CALLBACK SettingsWindow::EditSubclassProc(HWND hwnd, UINT uMsg, WPARAM w
                 GetWindowRect(hwnd, &rc);
                 OffsetRect(&rc, -rc.left, -rc.top);
 
-                // Thin 1-pixel border matching button borders
-                HPEN hPen = CreatePen(PS_SOLID, 1, RGB(160, 160, 160));
-                HGDIOBJ oldPen = SelectObject(hdc, hPen);
+                // Use pre-cached border pen (0 GDI object allocations)
+                HGDIOBJ oldPen = SelectObject(hdc, Theme::GetDarkEditBorderPen());
                 HGDIOBJ oldBr = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
                 Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
 
                 SelectObject(hdc, oldBr);
                 SelectObject(hdc, oldPen);
-                DeleteObject(hPen);
                 ReleaseDC(hwnd, hdc);
                 return 0;
             }
@@ -163,7 +163,7 @@ LRESULT CALLBACK SettingsWindow::EditSubclassProc(HWND hwnd, UINT uMsg, WPARAM w
     return DefSubclassProc(hwnd, uMsg, wParam, lParam);
 }
 
-LRESULT CALLBACK SettingsWindow::ComboBoxSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+LRESULT CALLBACK SettingsWindow::ComboBoxSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/) {
     if (uMsg == WM_PAINT && Theme::IsSystemDarkMode()) {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
@@ -171,17 +171,13 @@ LRESULT CALLBACK SettingsWindow::ComboBoxSubclassProc(HWND hwnd, UINT uMsg, WPAR
         RECT rc;
         GetClientRect(hwnd, &rc);
 
-        HBRUSH hBg = CreateSolidBrush(Theme::GetDarkControlColor());
-        FillRect(hdc, &rc, hBg);
-        DeleteObject(hBg);
+        FillRect(hdc, &rc, Theme::GetDarkControlBrush());
 
-        HPEN hBorderPen = CreatePen(PS_SOLID, 1, RGB(70, 70, 70));
-        HGDIOBJ hOldPen = SelectObject(hdc, hBorderPen);
+        HGDIOBJ hOldPen = SelectObject(hdc, Theme::GetDarkComboBorderPen());
         HGDIOBJ hOldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
         Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
         SelectObject(hdc, hOldBrush);
         SelectObject(hdc, hOldPen);
-        DeleteObject(hBorderPen);
 
         int cur = static_cast<int>(SendMessageW(hwnd, CB_GETCURSEL, 0, 0));
         if (cur >= 0) {
@@ -204,15 +200,13 @@ LRESULT CALLBACK SettingsWindow::ComboBoxSubclassProc(HWND hwnd, UINT uMsg, WPAR
 
         int arrowCenterX = rc.right - 14;
         int arrowCenterY = (rc.top + rc.bottom) / 2;
-        HPEN hArrowPen = CreatePen(PS_SOLID, 2, RGB(180, 180, 180));
-        SelectObject(hdc, hArrowPen);
+        SelectObject(hdc, Theme::GetDarkComboArrowPen());
 
         MoveToEx(hdc, arrowCenterX - 4, arrowCenterY - 2, nullptr);
         LineTo(hdc, arrowCenterX, arrowCenterY + 2);
         LineTo(hdc, arrowCenterX + 5, arrowCenterY - 3);
 
-        SelectObject(hdc, hOldPen);
-        DeleteObject(hArrowPen);
+        SelectObject(hdc, GetStockObject(BLACK_PEN));
 
         EndPaint(hwnd, &ps);
         return 0;
@@ -220,7 +214,7 @@ LRESULT CALLBACK SettingsWindow::ComboBoxSubclassProc(HWND hwnd, UINT uMsg, WPAR
     return DefSubclassProc(hwnd, uMsg, wParam, lParam);
 }
 
-LRESULT CALLBACK SettingsWindow::CheckboxSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+LRESULT CALLBACK SettingsWindow::CheckboxSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/) {
     if (uMsg == WM_PAINT && Theme::IsSystemDarkMode()) {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
@@ -232,7 +226,6 @@ LRESULT CALLBACK SettingsWindow::CheckboxSubclassProc(HWND hwnd, UINT uMsg, WPAR
 
         bool isChecked = (SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
-        // Checkbox box sized to 18x18 pixels, matching earlier design
         int boxSize = 18;
         int boxX = 0;
         int boxY = (rc.bottom - rc.top - boxSize) / 2;
@@ -240,34 +233,24 @@ LRESULT CALLBACK SettingsWindow::CheckboxSubclassProc(HWND hwnd, UINT uMsg, WPAR
         RECT rcBox = { boxX, boxY, boxX + boxSize, boxY + boxSize };
 
         if (isChecked) {
-            HBRUSH hBlue = CreateSolidBrush(RGB(0, 103, 192));
-            HPEN hPen = CreatePen(PS_SOLID, 1, RGB(0, 120, 215));
-            HGDIOBJ oldPen = SelectObject(hdc, hPen);
-            HGDIOBJ oldBr = SelectObject(hdc, hBlue);
+            HGDIOBJ oldPen = SelectObject(hdc, Theme::GetAccentPen());
+            HGDIOBJ oldBr = SelectObject(hdc, Theme::GetAccentBrush());
             RoundRect(hdc, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 4, 4);
 
-            HPEN hCheckPen = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
-            SelectObject(hdc, hCheckPen);
+            SelectObject(hdc, Theme::GetWhiteCheckPen());
             MoveToEx(hdc, boxX + 4, boxY + 9, nullptr);
             LineTo(hdc, boxX + 7, boxY + 13);
             LineTo(hdc, boxX + 14, boxY + 5);
 
             SelectObject(hdc, oldBr);
             SelectObject(hdc, oldPen);
-            DeleteObject(hCheckPen);
-            DeleteObject(hPen);
-            DeleteObject(hBlue);
         } else {
-            HBRUSH hDark = CreateSolidBrush(Theme::GetDarkControlColor());
-            HPEN hPen = CreatePen(PS_SOLID, 1, RGB(130, 130, 130));
-            HGDIOBJ oldPen = SelectObject(hdc, hPen);
-            HGDIOBJ oldBr = SelectObject(hdc, hDark);
+            HGDIOBJ oldPen = SelectObject(hdc, Theme::GetDarkCheckboxBorderPen());
+            HGDIOBJ oldBr = SelectObject(hdc, Theme::GetDarkControlBrush());
             RoundRect(hdc, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 4, 4);
 
             SelectObject(hdc, oldBr);
             SelectObject(hdc, oldPen);
-            DeleteObject(hPen);
-            DeleteObject(hDark);
         }
 
         wchar_t text[256] = { 0 };
@@ -330,14 +313,15 @@ INT_PTR CALLBACK SettingsWindow::DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             bool dark = Theme::IsSystemDarkMode();
             bool isSelected = (pDIS->itemState & ODS_SELECTED);
 
-            COLORREF bg = dark ? (isSelected ? RGB(60, 60, 60) : Theme::GetDarkControlColor())
-                               : (isSelected ? GetSysColor(COLOR_HIGHLIGHT) : GetSysColor(COLOR_WINDOW));
+            if (dark) {
+                FillRect(hdc, &rc, isSelected ? Theme::GetDarkComboSelectionBrush() : Theme::GetDarkControlBrush());
+            } else {
+                HBRUSH hSysBr = GetSysColorBrush(isSelected ? COLOR_HIGHLIGHT : COLOR_WINDOW);
+                FillRect(hdc, &rc, hSysBr);
+            }
+
             COLORREF fg = dark ? Theme::GetDarkTextColor()
                                : (isSelected ? GetSysColor(COLOR_HIGHLIGHTTEXT) : GetSysColor(COLOR_WINDOWTEXT));
-
-            HBRUSH hBr = CreateSolidBrush(bg);
-            FillRect(hdc, &rc, hBr);
-            DeleteObject(hBr);
 
             if (pDIS->itemID != static_cast<UINT>(-1)) {
                 wchar_t text[256] = { 0 };
@@ -423,6 +407,7 @@ INT_PTR CALLBACK SettingsWindow::DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 
     case WM_CLOSE: {
         ShowWindow(hwnd, SW_HIDE);
+        SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
         return TRUE;
     }
 
@@ -474,7 +459,7 @@ void SettingsWindow::OnInitDialog(HWND hwnd) {
     SendMessageW(hCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Open Website / URL"));
     SendMessageW(hCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Run PowerShell Command"));
 
-    m_config = ConfigManager::Load();
+    m_config = ConfigManager::GetCached();
     LoadConfigToUI();
 
     CenterEditText(hEditTarget);
@@ -496,7 +481,8 @@ void SettingsWindow::LoadConfigToUI() {
     SetDlgItemTextW(m_hwnd, IDC_EDIT_TARGET, target.c_str());
     SetDlgItemTextW(m_hwnd, IDC_EDIT_ARGS, m_config.arguments.c_str());
 
-    CheckDlgButton(m_hwnd, IDC_CHECK_STARTUP, ConfigManager::IsStartupEnabled() ? BST_CHECKED : BST_UNCHECKED);
+    // Instant UI initialization using cached config (0 child process delay)
+    CheckDlgButton(m_hwnd, IDC_CHECK_STARTUP, m_config.startWithWindows ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(m_hwnd, IDC_CHECK_ADMIN, m_config.runAsAdmin ? BST_CHECKED : BST_UNCHECKED);
 
     UpdateTargetPrompt();
@@ -588,7 +574,7 @@ void SettingsWindow::OnBrowse(HWND hwnd) {
     }
 }
 
-void SettingsWindow::OnCommand(HWND hwnd, WPARAM wParam, LPARAM lParam) {
+void SettingsWindow::OnCommand(HWND hwnd, WPARAM wParam, LPARAM /*lParam*/) {
     WORD id = LOWORD(wParam);
     WORD code = HIWORD(wParam);
 

@@ -2,8 +2,6 @@
 
 #include <windows.h>
 #include <functional>
-#include <thread>
-#include <atomic>
 
 class SingleInstance {
 public:
@@ -16,8 +14,10 @@ public:
     void StopWakeupListener();
 
 private:
+    static VOID CALLBACK WakeupWaitCallback(PVOID lpParameter, BOOLEAN TimerOrWaitFired);
+
     HANDLE m_hMutex = nullptr;
     HANDLE m_hWakeupEvent = nullptr;
-    std::thread m_listenerThread;
-    std::atomic<bool> m_running{ false };
+    HANDLE m_hWaitHandle = nullptr;
+    std::function<void()> m_onWakeup = nullptr;
 };

@@ -13,6 +13,16 @@ public:
 
     static HBRUSH GetDarkBackgroundBrush();
     static HBRUSH GetDarkControlBrush();
+    static HBRUSH GetDarkComboSelectionBrush();
+    static HBRUSH GetAccentBrush();
+
+    static HPEN GetDarkEditBorderPen();
+    static HPEN GetDarkComboBorderPen();
+    static HPEN GetDarkComboArrowPen();
+    static HPEN GetDarkCheckboxBorderPen();
+    static HPEN GetAccentPen();
+    static HPEN GetWhiteCheckPen();
+
     static COLORREF GetDarkBackgroundColor();
     static COLORREF GetDarkControlColor();
     static COLORREF GetDarkTextColor();
@@ -21,4 +31,13 @@ public:
 private:
     static HBRUSH s_hDarkBgBrush;
     static HBRUSH s_hDarkCtrlBrush;
+    static HBRUSH s_hDarkComboSelBrush;
+    static HBRUSH s_hAccentBrush;
+
+    static HPEN s_hDarkEditBorderPen;
+    static HPEN s_hDarkComboBorderPen;
+    static HPEN s_hDarkComboArrowPen;
+    static HPEN s_hDarkCheckboxBorderPen;
+    static HPEN s_hAccentPen;
+    static HPEN s_hWhiteCheckPen;
 };

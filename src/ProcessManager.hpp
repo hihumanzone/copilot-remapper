@@ -12,7 +12,7 @@ public:
     // Resolves a .lnk shortcut file to its target executable path.
     static bool ResolveShortcut(const std::wstring& shortcutPath, std::wstring& targetPath);
 
-    // Queries process executable name using Toolhelp32 snapshot (works even when OpenProcess is denied)
+    // Queries process executable name using Toolhelp32 snapshot (fallback)
     static std::wstring GetProcessNameFromPid(DWORD pid);
 
     // Checks if the current foreground window belongs to the target application.

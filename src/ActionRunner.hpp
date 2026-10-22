@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Config.hpp"
+#include <string>
 
 class ActionRunner {
 public:
@@ -10,4 +11,5 @@ public:
 
 private:
     static std::wstring ExpandEnv(const std::wstring& input);
+    static VOID CALLBACK ThreadPoolActionCallback(PTP_CALLBACK_INSTANCE Instance, PVOID Context);
 };

@@ -67,7 +67,7 @@ if %errorlevel% neq 0 (
 )
 
 echo Compiling C++ sources...
-%GXX% -std=c++17 -O3 -mwindows -municode -static -s -DUNICODE -D_UNICODE ^
+%GXX% -std=c++17 -O3 -ffunction-sections -fdata-sections -mwindows -municode -static -s -DUNICODE -D_UNICODE -DNDEBUG ^
     -I"%~dp0." -I"%~dp0src" ^
     "%~dp0src\main.cpp" ^
     "%~dp0src\Config.cpp" ^
@@ -80,7 +80,7 @@ echo Compiling C++ sources...
     "%~dp0src\SingleInstance.cpp" ^
     "%~dp0src\ProcessManager.cpp" ^
     "%~dp0resource.o" ^
-    -lgdiplus -lcomctl32 -ldwmapi -luxtheme -lole32 -luuid ^
+    -Wl,--gc-sections -lcomctl32 -ldwmapi -luxtheme -lole32 -luuid ^
     -o "%~dp0CopilotRemapper.exe"
 
 set COMPILE_ERR=%errorlevel%
@@ -102,7 +102,7 @@ if %errorlevel% neq 0 (
 )
 
 echo Compiling C++ sources with MSVC...
-cl.exe /nologo /std:c++17 /O2 /W3 /DUNICODE /D_UNICODE /EHsc ^
+cl.exe /nologo /std:c++17 /O2 /GL /Gy /Gw /W3 /DUNICODE /D_UNICODE /DNDEBUG /EHsc ^
     /I"%~dp0." /I"%~dp0src" ^
     "%~dp0src\main.cpp" ^
     "%~dp0src\Config.cpp" ^
@@ -115,8 +115,8 @@ cl.exe /nologo /std:c++17 /O2 /W3 /DUNICODE /D_UNICODE /EHsc ^
     "%~dp0src\SingleInstance.cpp" ^
     "%~dp0src\ProcessManager.cpp" ^
     "%~dp0resource.res" ^
-    /link /SUBSYSTEM:WINDOWS /OUT:"%~dp0CopilotRemapper.exe" ^
-    user32.lib gdi32.lib gdiplus.lib shell32.lib comctl32.lib dwmapi.lib uxtheme.lib advapi32.lib ole32.lib uuid.lib
+    /link /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF /OUT:"%~dp0CopilotRemapper.exe" ^
+    user32.lib gdi32.lib shell32.lib comctl32.lib dwmapi.lib uxtheme.lib advapi32.lib ole32.lib uuid.lib
 
 set COMPILE_ERR=%errorlevel%
 del "%~dp0resource.res" >nul 2>&1

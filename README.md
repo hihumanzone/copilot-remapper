@@ -31,7 +31,8 @@ Because legacy physical keyboards only have keys up to `F12`, Microsoft utilized
 ## 🚀 Key Features
 
 * **100% Native C++ (C++17)**: Fully migrated from C# to modern native C++ with zero runtime framework dependencies (no .NET runtime, no external DLLs). Statically linked into a single standalone binary.
-* **Ultra-Low Resource Footprint**: Consumes **<4 MB RAM** and **0% CPU** while idle.
+* **Ultra-Low Resource Footprint**: Consumes **<1 MB RAM (typically ~600 KB)** and **0% CPU** while idle.
+* **Featherweight Executable**: Compact standalone binary of only **~230 KB** with Link-Time dead code stripping and zero external runtime frameworks.
 * **100% Native Windows UI**: Built with standard Windows Common Controls (`ComCtl32.dll` v6.0), Win32 dialogs, and native layout containers with zero third-party UI libraries.
 * **High-DPI PerMonitorV2 Aware**: Crisp, sharp text and layout across any monitor DPI scaling via `app.manifest` and `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`.
 * **DWM System Theming**: Automatically detects Windows Light/Dark mode and activates `DWMWA_USE_IMMERSIVE_DARK_MODE` on the title bar, reacting dynamically to system theme changes.
@@ -55,6 +56,7 @@ copilot-remapper/
 ├── .gitignore              # Ignores build output, local config, and compiler tools
 ├── CMakeLists.txt          # Standard CMake build script (MSVC / GCC / Clang)
 ├── CopilotRemapper.exe     # Standalone native Windows executable (build output)
+├── app.ico                 # Multi-resolution application icon (16x16 to 256x256)
 ├── app.manifest            # PerMonitorV2 High-DPI application manifest
 ├── build.bat               # 1-click batch build script (auto-detects / bootstraps compiler)
 ├── build.ps1               # PowerShell build script alternative
@@ -69,7 +71,7 @@ copilot-remapper/
     ├── ActionRunner.hpp
     ├── Config.cpp          # Config management, zero-dep JSON engine, Task Scheduler auto-start
     ├── Config.hpp
-    ├── IconHelper.cpp      # Dynamic GDI+ icon generator (rounded blue square + white 'C')
+    ├── IconHelper.cpp      # Native high-DPI icon loader & Win32 GDI fallback (zero GDI+ runtime)
     ├── IconHelper.hpp
     ├── KeyboardHook.cpp    # Low-level keyboard hook (WH_KEYBOARD_LL), F23 interceptor
     ├── KeyboardHook.hpp

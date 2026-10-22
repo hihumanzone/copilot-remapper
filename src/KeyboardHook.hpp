@@ -2,7 +2,6 @@
 
 #include <windows.h>
 #include <functional>
-#include <chrono>
 
 class KeyboardHook {
 public:
@@ -20,5 +19,5 @@ private:
     static HHOOK s_hook;
     static std::function<void()> s_callback;
     static bool s_hasTriggered;
-    static std::chrono::steady_clock::time_point s_lastTrigger;
+    static ULONGLONG s_lastTriggerTick;
 };

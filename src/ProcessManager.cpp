@@ -3,7 +3,14 @@
 #include <shlobj.h>
 #include <tlhelp32.h>
 #include <dwmapi.h>
-#include <algorithm>
+#include <vector>
+
+static inline const wchar_t* GetBaseName(const wchar_t* path) {
+    if (!path) return L"";
+    const wchar_t* pSlash = wcsrchr(path, L'\\');
+    if (!pSlash) pSlash = wcsrchr(path, L'/');
+    return pSlash ? pSlash + 1 : path;
+}
 
 static std::wstring TrimQuotes(const std::wstring& str) {
     if (str.length() >= 2 && str.front() == L'"' && str.back() == L'"') {
@@ -68,7 +75,7 @@ std::wstring ProcessManager::ExtractExeName(const std::wstring& targetPath) {
     std::wstring cleaned = TrimQuotes(targetPath);
     if (cleaned.empty()) return L"";
 
-    // If it is a shortcut (.lnk), resolve to the underlying executable
+    // If it is a shortcut (.lnk), resolve to the underlying executable once
     if (cleaned.length() >= 4 && _wcsicmp(cleaned.c_str() + cleaned.length() - 4, L".lnk") == 0) {
         std::wstring resolved;
         if (ResolveShortcut(cleaned, resolved)) {
@@ -76,8 +83,8 @@ std::wstring ProcessManager::ExtractExeName(const std::wstring& targetPath) {
         }
     }
 
-    size_t idx = cleaned.find_last_of(L"\\/");
-    std::wstring exeName = (idx != std::wstring::npos) ? cleaned.substr(idx + 1) : cleaned;
+    const wchar_t* pBase = GetBaseName(cleaned.c_str());
+    std::wstring exeName = pBase;
 
     // Append .exe if not present and no other extension exists
     if (exeName.find(L'.') == std::wstring::npos) {
@@ -91,7 +98,6 @@ bool ProcessManager::IsProcessElevated(DWORD pid, bool& isElevated) {
     isElevated = false;
     HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!hProc) {
-        // If access denied on same user session, it's typically elevated
         if (GetLastError() == ERROR_ACCESS_DENIED) {
             isElevated = true;
             return true;
@@ -115,12 +121,6 @@ bool ProcessManager::IsProcessElevated(DWORD pid, bool& isElevated) {
 }
 
 bool ProcessManager::IsForegroundProcessTarget(const std::wstring& targetPath) {
-    HDESK hInput = OpenInputDesktop(0, FALSE, GENERIC_ALL);
-    if (hInput) {
-        SetThreadDesktop(hInput);
-        CloseDesktop(hInput);
-    }
-
     HWND hFore = GetForegroundWindow();
     if (!hFore) return false;
 
@@ -131,14 +131,13 @@ bool ProcessManager::IsForegroundProcessTarget(const std::wstring& targetPath) {
     std::wstring targetExe = ExtractExeName(targetPath);
     std::wstring cleanTarget = TrimQuotes(targetPath);
 
-    // Try QueryFullProcessImageNameW first
     HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, forePid);
     if (hProc) {
         wchar_t fullPath[MAX_PATH] = { 0 };
         DWORD size = MAX_PATH;
         if (QueryFullProcessImageNameW(hProc, 0, fullPath, &size)) {
-            std::wstring foreExe = ExtractExeName(fullPath);
-            if (_wcsicmp(foreExe.c_str(), targetExe.c_str()) == 0 ||
+            const wchar_t* foreExe = GetBaseName(fullPath);
+            if (_wcsicmp(foreExe, targetExe.c_str()) == 0 ||
                 (!cleanTarget.empty() && _wcsicmp(fullPath, cleanTarget.c_str()) == 0)) {
                 CloseHandle(hProc);
                 return true;
@@ -147,14 +146,14 @@ bool ProcessManager::IsForegroundProcessTarget(const std::wstring& targetPath) {
         CloseHandle(hProc);
     }
 
-    // Fallback: Toolhelp32 process snapshot (works across integrity levels)
-    std::wstring foreExe = GetProcessNameFromPid(forePid);
-    if (!foreExe.empty() && _wcsicmp(foreExe.c_str(), targetExe.c_str()) == 0) {
-        return true;
-    }
-
     return false;
 }
+
+struct PidMatchCache {
+    DWORD pid;
+    bool isMatch;
+    bool isElevated;
+};
 
 struct WindowSearchContext {
     std::wstring targetExe;
@@ -162,12 +161,13 @@ struct WindowSearchContext {
     bool mustBeElevated = false;
     HWND bestHwnd = nullptr;
     bool bestElevated = false;
+    std::vector<PidMatchCache> pidCache;
 };
 
 static BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
     auto* ctx = reinterpret_cast<WindowSearchContext*>(lParam);
 
-    // Skip windows that are neither visible nor minimized
+    // Fast reject non-windows and invisible windows
     if (!IsWindowVisible(hwnd) && !IsIconic(hwnd)) return TRUE;
 
     // Must be a top-level unowned window
@@ -177,79 +177,93 @@ static BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
     LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
     if (exStyle & WS_EX_TOOLWINDOW) return TRUE;
 
-    // Filter out cloaked windows (cloaked by Windows shell or other virtual desktop)
-    int cloaked = 0;
-    DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
-    if (cloaked) return TRUE;
-
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
     if (pid == 0 || pid == GetCurrentProcessId()) return TRUE;
 
-    std::wstring exeName;
-    wchar_t imagePath[MAX_PATH] = { 0 };
-    DWORD size = MAX_PATH;
+    // Fast PID lookup in local enumeration cache
+    bool isMatch = false;
     bool isElevated = false;
+    bool foundInCache = false;
 
-    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (hProc) {
-        if (QueryFullProcessImageNameW(hProc, 0, imagePath, &size)) {
-            exeName = ProcessManager::ExtractExeName(imagePath);
+    for (const auto& entry : ctx->pidCache) {
+        if (entry.pid == pid) {
+            foundInCache = true;
+            isMatch = entry.isMatch;
+            isElevated = entry.isElevated;
+            break;
         }
+    }
 
-        HANDLE hToken = nullptr;
-        if (OpenProcessToken(hProc, TOKEN_QUERY, &hToken)) {
-            TOKEN_ELEVATION elev = { 0 };
-            DWORD dwSize = sizeof(elev);
-            if (GetTokenInformation(hToken, TokenElevation, &elev, sizeof(elev), &dwSize)) {
-                isElevated = (elev.TokenIsElevated != 0);
+    if (!foundInCache) {
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (hProc) {
+            wchar_t imagePath[MAX_PATH] = { 0 };
+            DWORD size = MAX_PATH;
+            if (QueryFullProcessImageNameW(hProc, 0, imagePath, &size)) {
+                const wchar_t* exeName = GetBaseName(imagePath);
+                isMatch = (_wcsicmp(exeName, ctx->targetExe.c_str()) == 0);
+                if (!isMatch && !ctx->targetCleanPath.empty()) {
+                    isMatch = (_wcsicmp(imagePath, ctx->targetCleanPath.c_str()) == 0);
+                }
             }
-            CloseHandle(hToken);
-        }
-        CloseHandle(hProc);
-    } else {
-        if (GetLastError() == ERROR_ACCESS_DENIED) {
-            isElevated = true; // High IL process in same desktop session
-        }
-    }
 
-    if (exeName.empty()) {
-        exeName = ProcessManager::GetProcessNameFromPid(pid);
-    }
-
-    if (exeName.empty()) return TRUE;
-
-    bool isMatch = (_wcsicmp(exeName.c_str(), ctx->targetExe.c_str()) == 0);
-    if (!isMatch && !ctx->targetCleanPath.empty() && imagePath[0] != L'\0') {
-        isMatch = (_wcsicmp(imagePath, ctx->targetCleanPath.c_str()) == 0);
-    }
-
-    if (isMatch) {
-        wchar_t title[256] = { 0 };
-        GetWindowTextW(hwnd, title, 256);
-        bool hasTitle = (title[0] != L'\0');
-
-        if (ctx->mustBeElevated) {
-            if (isElevated && hasTitle) {
-                ctx->bestHwnd = hwnd;
-                ctx->bestElevated = true;
-                return FALSE; // Exact match found: elevated main window
-            } else if (isElevated && ctx->bestHwnd == nullptr) {
-                ctx->bestHwnd = hwnd;
-                ctx->bestElevated = true;
-            } else if (ctx->bestHwnd == nullptr || (hasTitle && !ctx->bestElevated)) {
-                ctx->bestHwnd = hwnd;
-                ctx->bestElevated = isElevated;
+            if (isMatch) {
+                HANDLE hToken = nullptr;
+                if (OpenProcessToken(hProc, TOKEN_QUERY, &hToken)) {
+                    TOKEN_ELEVATION elev = { 0 };
+                    DWORD dwSize = sizeof(elev);
+                    if (GetTokenInformation(hToken, TokenElevation, &elev, sizeof(elev), &dwSize)) {
+                        isElevated = (elev.TokenIsElevated != 0);
+                    }
+                    CloseHandle(hToken);
+                }
             }
+            CloseHandle(hProc);
         } else {
-            if (hasTitle) {
-                ctx->bestHwnd = hwnd;
-                ctx->bestElevated = isElevated;
-                return FALSE; // Match found
-            } else if (ctx->bestHwnd == nullptr) {
-                ctx->bestHwnd = hwnd;
-                ctx->bestElevated = isElevated;
+            if (GetLastError() == ERROR_ACCESS_DENIED) {
+                isElevated = true;
+                // Query process name from single lookup only if needed
+                std::wstring pName = ProcessManager::GetProcessNameFromPid(pid);
+                isMatch = (_wcsicmp(pName.c_str(), ctx->targetExe.c_str()) == 0);
             }
+        }
+
+        ctx->pidCache.push_back({ pid, isMatch, isElevated });
+    }
+
+    // Skip windows not belonging to target process
+    if (!isMatch) return TRUE;
+
+    // Filter out cloaked windows only after confirming process match
+    int cloaked = 0;
+    DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+    if (cloaked) return TRUE;
+
+    // Check window title
+    int titleLen = GetWindowTextLengthW(hwnd);
+    bool hasTitle = (titleLen > 0);
+
+    if (ctx->mustBeElevated) {
+        if (isElevated && hasTitle) {
+            ctx->bestHwnd = hwnd;
+            ctx->bestElevated = true;
+            return FALSE; // Match found: elevated main window
+        } else if (isElevated && ctx->bestHwnd == nullptr) {
+            ctx->bestHwnd = hwnd;
+            ctx->bestElevated = true;
+        } else if (ctx->bestHwnd == nullptr || (hasTitle && !ctx->bestElevated)) {
+            ctx->bestHwnd = hwnd;
+            ctx->bestElevated = isElevated;
+        }
+    } else {
+        if (hasTitle) {
+            ctx->bestHwnd = hwnd;
+            ctx->bestElevated = isElevated;
+            return FALSE; // Match found
+        } else if (ctx->bestHwnd == nullptr) {
+            ctx->bestHwnd = hwnd;
+            ctx->bestElevated = isElevated;
         }
     }
 
@@ -262,14 +276,9 @@ HWND ProcessManager::FindTargetWindow(const std::wstring& targetPath, bool mustB
     ctx.targetExe = ExtractExeName(targetPath);
     ctx.targetCleanPath = TrimQuotes(targetPath);
     ctx.mustBeElevated = mustBeElevated;
+    ctx.pidCache.reserve(32);
 
-    HDESK hInput = OpenInputDesktop(0, FALSE, GENERIC_ALL);
-    if (hInput) {
-        EnumDesktopWindows(hInput, EnumWindowsCallback, reinterpret_cast<LPARAM>(&ctx));
-        CloseDesktop(hInput);
-    } else {
-        EnumWindows(EnumWindowsCallback, reinterpret_cast<LPARAM>(&ctx));
-    }
+    EnumWindows(EnumWindowsCallback, reinterpret_cast<LPARAM>(&ctx));
 
     foundElevated = ctx.bestElevated;
     return ctx.bestHwnd;
@@ -305,7 +314,7 @@ bool ProcessManager::ActivateWindow(HWND hwnd) {
         attachedTarget = AttachThreadInput(curThread, targetThread, TRUE);
     }
 
-    // Simulate Alt key down/up to unlock focus stealing
+    // Simulate Alt key tap to unlock focus stealing
     INPUT ip[2] = {};
     ip[0].type = INPUT_KEYBOARD;
     ip[0].ki.wVk = VK_MENU;

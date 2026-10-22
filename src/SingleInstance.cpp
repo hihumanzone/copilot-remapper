@@ -47,38 +47,43 @@ void SingleInstance::SignalExistingInstance() {
     }
 }
 
+VOID CALLBACK SingleInstance::WakeupWaitCallback(PVOID lpParameter, BOOLEAN TimerOrWaitFired) {
+    if (!TimerOrWaitFired && lpParameter) {
+        auto* pThis = static_cast<SingleInstance*>(lpParameter);
+        if (pThis && pThis->m_onWakeup) {
+            pThis->m_onWakeup();
+        }
+    }
+}
+
 void SingleInstance::StartWakeupListener(std::function<void()> onWakeup) {
+    m_onWakeup = std::move(onWakeup);
+
     m_hWakeupEvent = CreateEventW(nullptr, FALSE, FALSE, EVENT_NAME);
     if (!m_hWakeupEvent && GetLastError() == ERROR_ACCESS_DENIED) {
         m_hWakeupEvent = CreateEventW(nullptr, FALSE, FALSE, LOCAL_EVENT_NAME);
     }
     if (!m_hWakeupEvent) return;
 
-    m_running = true;
-    m_listenerThread = std::thread([this, onWakeup]() {
-        while (m_running) {
-            DWORD res = WaitForSingleObject(m_hWakeupEvent, 500);
-            if (res == WAIT_OBJECT_0 && m_running) {
-                if (onWakeup) {
-                    onWakeup();
-                }
-            }
-        }
-    });
+    // Register with OS wait threadpool: zero active worker threads and zero CPU polling
+    RegisterWaitForSingleObject(
+        &m_hWaitHandle,
+        m_hWakeupEvent,
+        WakeupWaitCallback,
+        this,
+        INFINITE,
+        WT_EXECUTEDEFAULT
+    );
 }
 
 void SingleInstance::StopWakeupListener() {
-    if (m_running) {
-        m_running = false;
-        if (m_hWakeupEvent) {
-            SetEvent(m_hWakeupEvent);
-        }
-        if (m_listenerThread.joinable()) {
-            m_listenerThread.join();
-        }
+    if (m_hWaitHandle) {
+        UnregisterWaitEx(m_hWaitHandle, INVALID_HANDLE_VALUE);
+        m_hWaitHandle = nullptr;
     }
     if (m_hWakeupEvent) {
         CloseHandle(m_hWakeupEvent);
         m_hWakeupEvent = nullptr;
     }
+    m_onWakeup = nullptr;
 }

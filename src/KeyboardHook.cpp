@@ -5,7 +5,7 @@
 HHOOK KeyboardHook::s_hook = nullptr;
 std::function<void()> KeyboardHook::s_callback = nullptr;
 bool KeyboardHook::s_hasTriggered = false;
-std::chrono::steady_clock::time_point KeyboardHook::s_lastTrigger = {};
+ULONGLONG KeyboardHook::s_lastTriggerTick = 0;
 
 KeyboardHook::KeyboardHook() {
     Install();
@@ -40,28 +40,27 @@ LRESULT CALLBACK KeyboardHook::HookCallback(int nCode, WPARAM wParam, LPARAM lPa
     if (nCode >= 0 && lParam != 0) {
         auto* kb = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
 
-        // Intercept Copilot key: VK_F23 (0x86) or OEM VK_F24 (0x87)
+        // Intercept physical Copilot key: VK_F23 (0x86) or OEM VK_F24 (0x87)
         if (kb->vkCode == 0x86 || kb->vkCode == 0x87) {
             if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
                 ActionRunner::MaskStartMenu();
 
-                auto now = std::chrono::steady_clock::now();
-                AppConfig cfg = ConfigManager::Load();
-                int debounce = cfg.debounceMs > 50 ? cfg.debounceMs : 300;
+                ULONGLONG now = GetTickCount64();
+                AppConfig cfg = ConfigManager::GetCached();
+                ULONGLONG debounce = static_cast<ULONGLONG>(cfg.debounceMs > 50 ? cfg.debounceMs : 300);
 
                 bool shouldTrigger = false;
                 if (!s_hasTriggered) {
                     shouldTrigger = true;
                 } else {
-                    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastTrigger).count();
-                    if (elapsedMs >= debounce) {
+                    if ((now - s_lastTriggerTick) >= debounce) {
                         shouldTrigger = true;
                     }
                 }
 
                 if (shouldTrigger) {
                     s_hasTriggered = true;
-                    s_lastTrigger = now;
+                    s_lastTriggerTick = now;
                     ActionRunner::Execute(cfg);
                     if (s_callback) {
                         s_callback();

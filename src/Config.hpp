@@ -1,6 +1,8 @@
 #pragma once
 
+#include <windows.h>
 #include <string>
+#include <string_view>
 
 struct AppConfig {
     std::wstring actionType = L"LaunchApp";
@@ -14,9 +16,10 @@ struct AppConfig {
 
 class ConfigManager {
 public:
-    static std::wstring GetAppDirectory();
-    static std::wstring GetConfigPath();
+    static const std::wstring& GetAppDirectory();
+    static const std::wstring& GetConfigPath();
     static AppConfig Load();
+    static AppConfig GetCached();
     static void Save(const AppConfig& config);
     static void SetStartup(bool enable);
     static bool IsStartupEnabled();
@@ -24,9 +27,12 @@ public:
 private:
     static AppConfig s_cached;
     static bool s_hasCached;
+    static SRWLOCK s_configLock;
+    static std::wstring s_appDir;
+    static std::wstring s_configPath;
 
-    static std::wstring Utf8ToWide(const std::string& str);
-    static std::string WideToUtf8(const std::wstring& wstr);
-    static std::string EscapeJsonString(const std::string& str);
-    static std::string UnescapeJsonString(const std::string& str);
+    static std::wstring Utf8ToWide(std::string_view str);
+    static std::string WideToUtf8(std::wstring_view wstr);
+    static std::string EscapeJsonString(std::string_view str);
+    static std::string UnescapeJsonString(std::string_view str);
 };

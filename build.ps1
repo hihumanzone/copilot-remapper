@@ -70,11 +70,11 @@ if ($compiler -eq "cl.exe") {
     $resFile = Join-Path $scriptDir "resource.res"
     & rc.exe /nologo /fo "$resFile" "$resourceRc"
     
-    & cl.exe /nologo /std:c++17 /O2 /GL /Gy /Gw /W3 /DUNICODE /D_UNICODE /DNDEBUG /EHsc `
+    & cl.exe /nologo /std:c++20 /O2 /GL /Gy /Gw /GR- /W4 /DUNICODE /D_UNICODE /DNDEBUG /EHsc `
         "-I$scriptDir" "-I$(Join-Path $scriptDir 'src')" `
         $sources "$resFile" `
         /link /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF /OUT:"$outFile" `
-        user32.lib gdi32.lib shell32.lib comctl32.lib dwmapi.lib uxtheme.lib advapi32.lib ole32.lib uuid.lib
+        user32.lib gdi32.lib shell32.lib comctl32.lib dwmapi.lib uxtheme.lib advapi32.lib ole32.lib oleaut32.lib uuid.lib taskschd.lib
 
     Remove-Item "$resFile" -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $scriptDir "*.obj") -Force -ErrorAction SilentlyContinue
@@ -84,10 +84,10 @@ if ($compiler -eq "cl.exe") {
     & $windres -i "$resourceRc" -o "$resourceObj"
 
     Write-Host "Compiling C++ sources..." -ForegroundColor Gray
-    & $compiler -std=c++17 -O3 -ffunction-sections -fdata-sections -mwindows -municode -static -s -DUNICODE -D_UNICODE -DNDEBUG `
+    & $compiler -std=c++20 -Os -fno-exceptions -fno-rtti -fno-ident -ffunction-sections -fdata-sections -Wall -Wextra -mwindows -municode -static -s -DUNICODE -D_UNICODE -DNDEBUG `
         "-I$scriptDir" "-I$(Join-Path $scriptDir 'src')" `
         $sources "$resourceObj" `
-        "-Wl,--gc-sections" -lcomctl32 -ldwmapi -luxtheme -lole32 -luuid `
+        "-Wl,--gc-sections" -lcomctl32 -ldwmapi -luxtheme -lole32 -loleaut32 -luuid -ltaskschd `
         -o "$outFile"
 
     $compileErr = $LASTEXITCODE

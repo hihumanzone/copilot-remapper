@@ -2,22 +2,43 @@
 #include "../resource.h"
 
 HICON IconHelper::s_appIcon = nullptr;
+HICON IconHelper::s_smallAppIcon = nullptr;
 bool IconHelper::s_isCustomCreated = false;
 
-void IconHelper::Initialize() {
+void IconHelper::Initialize() noexcept {
     // Native GDI / Win32 resource loading replaces GDI+ completely.
-    // Zero runtime initialization delay and zero external framework DLLs.
 }
 
-void IconHelper::Shutdown() {
+void IconHelper::Shutdown() noexcept {
     if (s_appIcon && s_isCustomCreated) {
         DestroyIcon(s_appIcon);
     }
     s_appIcon = nullptr;
+    s_smallAppIcon = nullptr;
     s_isCustomCreated = false;
 }
 
-HICON IconHelper::GetAppIcon() {
+HICON IconHelper::GetSmallAppIcon() noexcept {
+    if (s_smallAppIcon) return s_smallAppIcon;
+
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    const int cx = GetSystemMetrics(SM_CXSMICON);
+    const int cy = GetSystemMetrics(SM_CYSMICON);
+    s_smallAppIcon = reinterpret_cast<HICON>(LoadImageW(
+        hInst,
+        MAKEINTRESOURCEW(IDI_APP_ICON),
+        IMAGE_ICON,
+        cx, cy,
+        LR_SHARED
+    ));
+
+    if (!s_smallAppIcon) {
+        s_smallAppIcon = GetAppIcon();
+    }
+    return s_smallAppIcon;
+}
+
+HICON IconHelper::GetAppIcon() noexcept {
     if (s_appIcon) return s_appIcon;
 
     HINSTANCE hInst = GetModuleHandleW(nullptr);

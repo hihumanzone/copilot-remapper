@@ -1,30 +1,102 @@
 #include "ProcessManager.hpp"
+#include "ComHelpers.hpp"
 #include <shobjidl.h>
 #include <shlobj.h>
 #include <tlhelp32.h>
 #include <dwmapi.h>
+#include <winternl.h>
+#include <array>
+#include <atomic>
+#include <iterator>
 #include <vector>
 
-static inline const wchar_t* GetBaseName(const wchar_t* path) {
+namespace {
+
+inline const wchar_t* GetBaseName(const wchar_t* path) noexcept {
     if (!path) return L"";
     const wchar_t* pSlash = wcsrchr(path, L'\\');
-    if (!pSlash) pSlash = wcsrchr(path, L'/');
+    const wchar_t* pFwd = wcsrchr(path, L'/');
+    if (pFwd && (!pSlash || pFwd > pSlash)) {
+        pSlash = pFwd;
+    }
     return pSlash ? pSlash + 1 : path;
 }
 
-static std::wstring TrimQuotes(const std::wstring& str) {
-    if (str.length() >= 2 && str.front() == L'"' && str.back() == L'"') {
-        return str.substr(1, str.length() - 2);
-    }
-    return str;
+inline bool EqualsIgnoreCase(std::wstring_view a, std::wstring_view b) noexcept {
+    if (a.size() != b.size()) return false;
+    return CompareStringOrdinal(a.data(), static_cast<int>(a.size()), b.data(), static_cast<int>(b.size()), TRUE) == CSTR_EQUAL;
 }
 
-std::wstring ProcessManager::GetProcessNameFromPid(DWORD pid) {
+inline bool EndsWithIgnoreCase(std::wstring_view str, std::wstring_view suffix) noexcept {
+    if (str.size() < suffix.size()) return false;
+    return EqualsIgnoreCase(str.substr(str.size() - suffix.size()), suffix);
+}
+
+using PfnNtQuerySystemInformation = NTSTATUS(NTAPI*)(SYSTEM_INFORMATION_CLASS, PVOID, ULONG, PULONG);
+
+PfnNtQuerySystemInformation GetNtQuerySystemInformation() noexcept {
+    static std::atomic<void*> s_cached{ nullptr };
+    void* fn = s_cached.load(std::memory_order_acquire);
+    if (!fn) {
+        if (HMODULE hNtDll = GetModuleHandleW(L"ntdll.dll")) {
+            fn = reinterpret_cast<void*>(GetProcAddress(hNtDll, "NtQuerySystemInformation"));
+            if (fn) {
+                s_cached.store(fn, std::memory_order_release);
+            }
+        }
+    }
+    return reinterpret_cast<PfnNtQuerySystemInformation>(fn);
+}
+
+bool FetchProcessSnapshot(std::vector<BYTE>& buffer) {
+    const PfnNtQuerySystemInformation pNtQuery = GetNtQuerySystemInformation();
+    if (!pNtQuery) return false;
+
+    ULONG size = 128 * 1024;
+    constexpr NTSTATUS kStatusInfoLengthMismatch = static_cast<NTSTATUS>(0xC0000004L);
+
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        buffer.resize(size);
+        ULONG needed = 0;
+        NTSTATUS st = pNtQuery(SystemProcessInformation, buffer.data(), size, &needed);
+        if (st >= 0) {
+            return true;
+        }
+        if (st != kStatusInfoLengthMismatch) {
+            buffer.clear();
+            return false;
+        }
+        size = (needed > size) ? (needed + 16384) : (size * 2);
+    }
+    buffer.clear();
+    return false;
+}
+
+std::wstring_view FindProcessNameInSnapshot(const std::vector<BYTE>& buffer, DWORD pid) noexcept {
+    if (buffer.empty()) return {};
+    size_t offset = 0;
+    while (offset + sizeof(SYSTEM_PROCESS_INFORMATION) <= buffer.size()) {
+        const auto* spi = reinterpret_cast<const SYSTEM_PROCESS_INFORMATION*>(buffer.data() + offset);
+        const DWORD entryPid = static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(spi->UniqueProcessId));
+        if (entryPid == pid) {
+            if (spi->ImageName.Buffer && spi->ImageName.Length > 0) {
+                return std::wstring_view(spi->ImageName.Buffer, spi->ImageName.Length / sizeof(wchar_t));
+            }
+            return {};
+        }
+        if (spi->NextEntryOffset == 0) break;
+        offset += spi->NextEntryOffset;
+    }
+    return {};
+}
+
+std::wstring GetProcessNameToolhelp(DWORD pid) {
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap == INVALID_HANDLE_VALUE) return L"";
 
-    PROCESSENTRY32W pe = { sizeof(pe) };
-    std::wstring name = L"";
+    PROCESSENTRY32W pe = {};
+    pe.dwSize = sizeof(pe);
+    std::wstring name;
     if (Process32FirstW(hSnap, &pe)) {
         do {
             if (pe.th32ProcessID == pid) {
@@ -37,60 +109,243 @@ std::wstring ProcessManager::GetProcessNameFromPid(DWORD pid) {
     return name;
 }
 
-bool ProcessManager::ResolveShortcut(const std::wstring& shortcutPath, std::wstring& targetPath) {
-    HRESULT hrCo = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    bool needCoUninit = SUCCEEDED(hrCo);
+struct PidMatchCache {
+    DWORD pid;
+    bool isMatch;
+    bool isElevated;
+};
 
-    IShellLinkW* pShellLink = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, reinterpret_cast<void**>(&pShellLink));
-    if (FAILED(hr)) {
-        if (needCoUninit) CoUninitialize();
+struct WindowSearchContext {
+    std::wstring_view targetExe;
+    std::wstring_view targetCleanPath;
+    DWORD selfPid = GetCurrentProcessId();
+    bool mustBeElevated = false;
+    HWND bestHwnd = nullptr;
+    bool bestElevated = false;
+
+    static constexpr size_t kInlineCacheCap = 64;
+    std::array<PidMatchCache, kInlineCacheCap> inlineCache{};
+    size_t inlineCount = 0;
+    std::vector<PidMatchCache> overflowCache;
+
+    bool snapshotAttempted = false;
+    bool hasSnapshot = false;
+    std::vector<BYTE> processSnapshot;
+
+    bool LookupPid(DWORD pid, bool& isMatch, bool& isElevated) const noexcept {
+        for (size_t i = 0; i < inlineCount; ++i) {
+            if (inlineCache[i].pid == pid) {
+                isMatch = inlineCache[i].isMatch;
+                isElevated = inlineCache[i].isElevated;
+                return true;
+            }
+        }
+        for (const auto& entry : overflowCache) {
+            if (entry.pid == pid) {
+                isMatch = entry.isMatch;
+                isElevated = entry.isElevated;
+                return true;
+            }
+        }
         return false;
     }
 
-    bool success = false;
-    IPersistFile* pPersistFile = nullptr;
-    hr = pShellLink->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&pPersistFile));
-    if (SUCCEEDED(hr)) {
-        hr = pPersistFile->Load(shortcutPath.c_str(), STGM_READ);
-        if (SUCCEEDED(hr)) {
-            wchar_t szPath[MAX_PATH] = { 0 };
-            hr = pShellLink->GetPath(szPath, MAX_PATH, nullptr, SLGP_RAWPATH);
-            if (SUCCEEDED(hr) && szPath[0] != L'\0') {
-                targetPath = szPath;
-                success = true;
+    void StorePid(DWORD pid, bool isMatch, bool isElevated) {
+        if (inlineCount < kInlineCacheCap) {
+            inlineCache[inlineCount++] = { pid, isMatch, isElevated };
+        } else {
+            overflowCache.push_back({ pid, isMatch, isElevated });
+        }
+    }
+
+    std::wstring_view LookupProtectedProcessName(DWORD pid) {
+        if (!snapshotAttempted) {
+            snapshotAttempted = true;
+            hasSnapshot = FetchProcessSnapshot(processSnapshot);
+        }
+        if (hasSnapshot) {
+            return FindProcessNameInSnapshot(processSnapshot, pid);
+        }
+        return {};
+    }
+};
+
+BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<WindowSearchContext*>(lParam);
+
+    // Fast reject invisible non-minimized windows and owned/tool windows
+    if (!IsWindowVisible(hwnd) && !IsIconic(hwnd)) return TRUE;
+    if (GetWindow(hwnd, GW_OWNER) != nullptr) return TRUE;
+    if (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) return TRUE;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == 0 || pid == ctx->selfPid) return TRUE;
+
+    bool isMatch = false;
+    bool isElevated = false;
+    if (!ctx->LookupPid(pid, isMatch, isElevated)) {
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (hProc) {
+            wchar_t imagePath[1024];
+            DWORD size = static_cast<DWORD>(std::size(imagePath));
+            if (QueryFullProcessImageNameW(hProc, 0, imagePath, &size)) {
+                const wchar_t* exeName = GetBaseName(imagePath);
+                isMatch = EqualsIgnoreCase(exeName, ctx->targetExe);
+                if (!isMatch && !ctx->targetCleanPath.empty()) {
+                    isMatch = EqualsIgnoreCase(std::wstring_view(imagePath, size), ctx->targetCleanPath);
+                }
+            }
+
+            if (isMatch) {
+                HANDLE hToken = nullptr;
+                if (OpenProcessToken(hProc, TOKEN_QUERY, &hToken)) {
+                    TOKEN_ELEVATION elev = {};
+                    DWORD dwSize = sizeof(elev);
+                    if (GetTokenInformation(hToken, TokenElevation, &elev, sizeof(elev), &dwSize)) {
+                        isElevated = (elev.TokenIsElevated != 0);
+                    }
+                    CloseHandle(hToken);
+                }
+            }
+            CloseHandle(hProc);
+        } else if (GetLastError() == ERROR_ACCESS_DENIED) {
+            isElevated = true;
+            std::wstring_view pName = ctx->LookupProtectedProcessName(pid);
+            if (!pName.empty()) {
+                isMatch = EqualsIgnoreCase(pName, ctx->targetExe);
+            } else if (!ctx->hasSnapshot) {
+                std::wstring fallback = GetProcessNameToolhelp(pid);
+                isMatch = EqualsIgnoreCase(fallback, ctx->targetExe);
             }
         }
-        pPersistFile->Release();
-    }
-    pShellLink->Release();
 
-    if (needCoUninit) {
-        CoUninitialize();
+        ctx->StorePid(pid, isMatch, isElevated);
     }
-    return success;
+
+    if (!isMatch) return TRUE;
+
+    // Filter out cloaked UWP/virtual-desktop windows only after confirming process match
+    int cloaked = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked != 0) {
+        return TRUE;
+    }
+
+    const bool hasTitle = (GetWindowTextLengthW(hwnd) > 0);
+    if (ctx->mustBeElevated) {
+        if (isElevated && hasTitle) {
+            ctx->bestHwnd = hwnd;
+            ctx->bestElevated = true;
+            return FALSE;
+        }
+        if (isElevated && ctx->bestHwnd == nullptr) {
+            ctx->bestHwnd = hwnd;
+            ctx->bestElevated = true;
+        } else if (ctx->bestHwnd == nullptr || (hasTitle && !ctx->bestElevated)) {
+            ctx->bestHwnd = hwnd;
+            ctx->bestElevated = isElevated;
+        }
+    } else {
+        if (hasTitle) {
+            ctx->bestHwnd = hwnd;
+            ctx->bestElevated = isElevated;
+            return FALSE;
+        }
+        if (ctx->bestHwnd == nullptr) {
+            ctx->bestHwnd = hwnd;
+            ctx->bestElevated = isElevated;
+        }
+    }
+
+    return TRUE;
 }
 
-std::wstring ProcessManager::ExtractExeName(const std::wstring& targetPath) {
+void BringWindowToFrontAttach(HWND hwnd, DWORD foreThread, DWORD targetThread, DWORD curThread) noexcept {
+    bool attachedFore = false;
+    bool attachedTarget = false;
+
+    if (foreThread != 0 && foreThread != curThread) {
+        attachedFore = AttachThreadInput(curThread, foreThread, TRUE) != FALSE;
+    }
+    if (targetThread != 0 && targetThread != curThread && targetThread != foreThread) {
+        attachedTarget = AttachThreadInput(curThread, targetThread, TRUE) != FALSE;
+    }
+
+    SetForegroundWindow(hwnd);
+    BringWindowToTop(hwnd);
+    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+
+    if (attachedFore) {
+        AttachThreadInput(curThread, foreThread, FALSE);
+    }
+    if (attachedTarget) {
+        AttachThreadInput(curThread, targetThread, FALSE);
+    }
+}
+
+} // namespace
+
+std::wstring ProcessManager::TrimQuotes(std::wstring_view str) {
+    if (str.size() >= 2 && str.front() == L'"' && str.back() == L'"') {
+        str.remove_prefix(1);
+        str.remove_suffix(1);
+    }
+    return std::wstring(str);
+}
+
+std::wstring ProcessManager::GetProcessNameFromPid(DWORD pid) {
+    std::vector<BYTE> buffer;
+    if (FetchProcessSnapshot(buffer)) {
+        std::wstring_view name = FindProcessNameInSnapshot(buffer, pid);
+        if (!name.empty()) {
+            return std::wstring(name);
+        }
+    }
+    return GetProcessNameToolhelp(pid);
+}
+
+bool ProcessManager::ResolveShortcut(std::wstring_view shortcutPath, std::wstring& targetPath) {
+    if (shortcutPath.empty()) return false;
+
+    CoInitGuard co;
+    ComPtr<IShellLinkW> pShellLink;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, pShellLink.PutVoid()))) {
+        return false;
+    }
+
+    ComPtr<IPersistFile> pPersistFile;
+    if (FAILED(pShellLink->QueryInterface(IID_IPersistFile, pPersistFile.PutVoid()))) {
+        return false;
+    }
+
+    std::wstring pathNullTerm(shortcutPath);
+    if (FAILED(pPersistFile->Load(pathNullTerm.c_str(), STGM_READ))) {
+        return false;
+    }
+
+    wchar_t szPath[1024] = {};
+    if (SUCCEEDED(pShellLink->GetPath(szPath, static_cast<int>(std::size(szPath)), nullptr, SLGP_RAWPATH)) && szPath[0] != L'\0') {
+        targetPath = szPath;
+        return true;
+    }
+    return false;
+}
+
+std::wstring ProcessManager::ExtractExeName(std::wstring_view targetPath) {
     std::wstring cleaned = TrimQuotes(targetPath);
     if (cleaned.empty()) return L"";
 
-    // If it is a shortcut (.lnk), resolve to the underlying executable once
-    if (cleaned.length() >= 4 && _wcsicmp(cleaned.c_str() + cleaned.length() - 4, L".lnk") == 0) {
+    if (EndsWithIgnoreCase(cleaned, L".lnk")) {
         std::wstring resolved;
         if (ResolveShortcut(cleaned, resolved)) {
-            cleaned = resolved;
+            cleaned = std::move(resolved);
         }
     }
 
-    const wchar_t* pBase = GetBaseName(cleaned.c_str());
-    std::wstring exeName = pBase;
-
-    // Append .exe if not present and no other extension exists
+    std::wstring exeName = GetBaseName(cleaned.c_str());
     if (exeName.find(L'.') == std::wstring::npos) {
         exeName += L".exe";
     }
-
     return exeName;
 }
 
@@ -108,7 +363,7 @@ bool ProcessManager::IsProcessElevated(DWORD pid, bool& isElevated) {
     bool success = false;
     HANDLE hToken = nullptr;
     if (OpenProcessToken(hProc, TOKEN_QUERY, &hToken)) {
-        TOKEN_ELEVATION elev = { 0 };
+        TOKEN_ELEVATION elev = {};
         DWORD dwSize = sizeof(elev);
         if (GetTokenInformation(hToken, TokenElevation, &elev, sizeof(elev), &dwSize)) {
             isElevated = (elev.TokenIsElevated != 0);
@@ -120,7 +375,9 @@ bool ProcessManager::IsProcessElevated(DWORD pid, bool& isElevated) {
     return success;
 }
 
-bool ProcessManager::IsForegroundProcessTarget(const std::wstring& targetPath) {
+bool ProcessManager::IsForegroundProcessTargetResolved(std::wstring_view targetExe, std::wstring_view cleanTarget) {
+    if (targetExe.empty()) return false;
+
     HWND hFore = GetForegroundWindow();
     if (!hFore) return false;
 
@@ -128,160 +385,46 @@ bool ProcessManager::IsForegroundProcessTarget(const std::wstring& targetPath) {
     GetWindowThreadProcessId(hFore, &forePid);
     if (forePid == 0 || forePid == GetCurrentProcessId()) return false;
 
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, forePid);
+    if (!hProc) return false;
+
+    wchar_t fullPath[1024];
+    DWORD size = static_cast<DWORD>(std::size(fullPath));
+    bool matched = false;
+    if (QueryFullProcessImageNameW(hProc, 0, fullPath, &size)) {
+        const wchar_t* foreExe = GetBaseName(fullPath);
+        matched = EqualsIgnoreCase(foreExe, targetExe) ||
+                  (!cleanTarget.empty() && EqualsIgnoreCase(std::wstring_view(fullPath, size), cleanTarget));
+    }
+    CloseHandle(hProc);
+    return matched;
+}
+
+bool ProcessManager::IsForegroundProcessTarget(std::wstring_view targetPath) {
     std::wstring targetExe = ExtractExeName(targetPath);
     std::wstring cleanTarget = TrimQuotes(targetPath);
-
-    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, forePid);
-    if (hProc) {
-        wchar_t fullPath[MAX_PATH] = { 0 };
-        DWORD size = MAX_PATH;
-        if (QueryFullProcessImageNameW(hProc, 0, fullPath, &size)) {
-            const wchar_t* foreExe = GetBaseName(fullPath);
-            if (_wcsicmp(foreExe, targetExe.c_str()) == 0 ||
-                (!cleanTarget.empty() && _wcsicmp(fullPath, cleanTarget.c_str()) == 0)) {
-                CloseHandle(hProc);
-                return true;
-            }
-        }
-        CloseHandle(hProc);
-    }
-
-    return false;
+    return IsForegroundProcessTargetResolved(targetExe, cleanTarget);
 }
 
-struct PidMatchCache {
-    DWORD pid;
-    bool isMatch;
-    bool isElevated;
-};
-
-struct WindowSearchContext {
-    std::wstring targetExe;
-    std::wstring targetCleanPath;
-    bool mustBeElevated = false;
-    HWND bestHwnd = nullptr;
-    bool bestElevated = false;
-    std::vector<PidMatchCache> pidCache;
-};
-
-static BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
-    auto* ctx = reinterpret_cast<WindowSearchContext*>(lParam);
-
-    // Fast reject non-windows and invisible windows
-    if (!IsWindowVisible(hwnd) && !IsIconic(hwnd)) return TRUE;
-
-    // Must be a top-level unowned window
-    if (GetWindow(hwnd, GW_OWNER) != nullptr) return TRUE;
-
-    // Filter out tool windows
-    LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    if (exStyle & WS_EX_TOOLWINDOW) return TRUE;
-
-    DWORD pid = 0;
-    GetWindowThreadProcessId(hwnd, &pid);
-    if (pid == 0 || pid == GetCurrentProcessId()) return TRUE;
-
-    // Fast PID lookup in local enumeration cache
-    bool isMatch = false;
-    bool isElevated = false;
-    bool foundInCache = false;
-
-    for (const auto& entry : ctx->pidCache) {
-        if (entry.pid == pid) {
-            foundInCache = true;
-            isMatch = entry.isMatch;
-            isElevated = entry.isElevated;
-            break;
-        }
-    }
-
-    if (!foundInCache) {
-        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        if (hProc) {
-            wchar_t imagePath[MAX_PATH] = { 0 };
-            DWORD size = MAX_PATH;
-            if (QueryFullProcessImageNameW(hProc, 0, imagePath, &size)) {
-                const wchar_t* exeName = GetBaseName(imagePath);
-                isMatch = (_wcsicmp(exeName, ctx->targetExe.c_str()) == 0);
-                if (!isMatch && !ctx->targetCleanPath.empty()) {
-                    isMatch = (_wcsicmp(imagePath, ctx->targetCleanPath.c_str()) == 0);
-                }
-            }
-
-            if (isMatch) {
-                HANDLE hToken = nullptr;
-                if (OpenProcessToken(hProc, TOKEN_QUERY, &hToken)) {
-                    TOKEN_ELEVATION elev = { 0 };
-                    DWORD dwSize = sizeof(elev);
-                    if (GetTokenInformation(hToken, TokenElevation, &elev, sizeof(elev), &dwSize)) {
-                        isElevated = (elev.TokenIsElevated != 0);
-                    }
-                    CloseHandle(hToken);
-                }
-            }
-            CloseHandle(hProc);
-        } else {
-            if (GetLastError() == ERROR_ACCESS_DENIED) {
-                isElevated = true;
-                // Query process name from single lookup only if needed
-                std::wstring pName = ProcessManager::GetProcessNameFromPid(pid);
-                isMatch = (_wcsicmp(pName.c_str(), ctx->targetExe.c_str()) == 0);
-            }
-        }
-
-        ctx->pidCache.push_back({ pid, isMatch, isElevated });
-    }
-
-    // Skip windows not belonging to target process
-    if (!isMatch) return TRUE;
-
-    // Filter out cloaked windows only after confirming process match
-    int cloaked = 0;
-    DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
-    if (cloaked) return TRUE;
-
-    // Check window title
-    int titleLen = GetWindowTextLengthW(hwnd);
-    bool hasTitle = (titleLen > 0);
-
-    if (ctx->mustBeElevated) {
-        if (isElevated && hasTitle) {
-            ctx->bestHwnd = hwnd;
-            ctx->bestElevated = true;
-            return FALSE; // Match found: elevated main window
-        } else if (isElevated && ctx->bestHwnd == nullptr) {
-            ctx->bestHwnd = hwnd;
-            ctx->bestElevated = true;
-        } else if (ctx->bestHwnd == nullptr || (hasTitle && !ctx->bestElevated)) {
-            ctx->bestHwnd = hwnd;
-            ctx->bestElevated = isElevated;
-        }
-    } else {
-        if (hasTitle) {
-            ctx->bestHwnd = hwnd;
-            ctx->bestElevated = isElevated;
-            return FALSE; // Match found
-        } else if (ctx->bestHwnd == nullptr) {
-            ctx->bestHwnd = hwnd;
-            ctx->bestElevated = isElevated;
-        }
-    }
-
-    return TRUE;
-}
-
-HWND ProcessManager::FindTargetWindow(const std::wstring& targetPath, bool mustBeElevated, bool& foundElevated) {
+HWND ProcessManager::FindTargetWindowResolved(std::wstring_view targetExe, std::wstring_view cleanTarget, bool mustBeElevated, bool& foundElevated) {
     foundElevated = false;
+    if (targetExe.empty()) return nullptr;
+
     WindowSearchContext ctx;
-    ctx.targetExe = ExtractExeName(targetPath);
-    ctx.targetCleanPath = TrimQuotes(targetPath);
+    ctx.targetExe = targetExe;
+    ctx.targetCleanPath = cleanTarget;
     ctx.mustBeElevated = mustBeElevated;
-    ctx.pidCache.reserve(32);
 
     EnumWindows(EnumWindowsCallback, reinterpret_cast<LPARAM>(&ctx));
 
     foundElevated = ctx.bestElevated;
     return ctx.bestHwnd;
+}
+
+HWND ProcessManager::FindTargetWindow(std::wstring_view targetPath, bool mustBeElevated, bool& foundElevated) {
+    std::wstring targetExe = ExtractExeName(targetPath);
+    std::wstring cleanTarget = TrimQuotes(targetPath);
+    return FindTargetWindowResolved(targetExe, cleanTarget, mustBeElevated, foundElevated);
 }
 
 bool ProcessManager::ActivateWindow(HWND hwnd) {
@@ -291,7 +434,7 @@ bool ProcessManager::ActivateWindow(HWND hwnd) {
 
     if (IsIconic(hwnd)) {
         ShowWindow(hwnd, SW_RESTORE);
-    } else {
+    } else if (!IsWindowVisible(hwnd)) {
         ShowWindow(hwnd, SW_SHOW);
     }
 
@@ -300,21 +443,22 @@ bool ProcessManager::ActivateWindow(HWND hwnd) {
         return true;
     }
 
-    DWORD curThread = GetCurrentThreadId();
-    DWORD foreThread = hFore ? GetWindowThreadProcessId(hFore, nullptr) : 0;
-    DWORD targetThread = GetWindowThreadProcessId(hwnd, nullptr);
-
-    bool attachedFore = false;
-    bool attachedTarget = false;
-
-    if (foreThread != 0 && foreThread != curThread) {
-        attachedFore = AttachThreadInput(curThread, foreThread, TRUE);
-    }
-    if (targetThread != 0 && targetThread != curThread && targetThread != foreThread) {
-        attachedTarget = AttachThreadInput(curThread, targetThread, TRUE);
+    // Fast path: directly request foreground when our recent input grants foreground lock
+    SetForegroundWindow(hwnd);
+    if (GetForegroundWindow() == hwnd) {
+        return true;
     }
 
-    // Simulate Alt key tap to unlock focus stealing
+    const DWORD curThread = GetCurrentThreadId();
+    const DWORD foreThread = hFore ? GetWindowThreadProcessId(hFore, nullptr) : 0;
+    const DWORD targetThread = GetWindowThreadProcessId(hwnd, nullptr);
+
+    BringWindowToFrontAttach(hwnd, foreThread, targetThread, curThread);
+    if (GetForegroundWindow() == hwnd) {
+        return true;
+    }
+
+    // Final fallback: simulate an Alt key tap only if Windows still denied focus transfer
     INPUT ip[2] = {};
     ip[0].type = INPUT_KEYBOARD;
     ip[0].ki.wVk = VK_MENU;
@@ -323,16 +467,6 @@ bool ProcessManager::ActivateWindow(HWND hwnd) {
     ip[1].ki.dwFlags = KEYEVENTF_KEYUP;
     SendInput(2, ip, sizeof(INPUT));
 
-    SetForegroundWindow(hwnd);
-    BringWindowToTop(hwnd);
-    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-
-    if (attachedFore) {
-        AttachThreadInput(curThread, foreThread, FALSE);
-    }
-    if (attachedTarget) {
-        AttachThreadInput(curThread, targetThread, FALSE);
-    }
-
+    BringWindowToFrontAttach(hwnd, foreThread, targetThread, curThread);
     return true;
 }

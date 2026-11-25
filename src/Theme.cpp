@@ -26,6 +26,9 @@ static pfnSetPreferredAppMode s_fnSetPreferredAppMode = nullptr;
 static pfnAllowDarkModeForWindow s_fnAllowDarkModeForWindow = nullptr;
 static pfnShouldAppsUseDarkMode s_fnShouldAppsUseDarkMode = nullptr;
 
+bool Theme::s_initialized = false;
+bool Theme::s_isDarkMode = false;
+
 HBRUSH Theme::s_hDarkBgBrush = nullptr;
 HBRUSH Theme::s_hDarkCtrlBrush = nullptr;
 HBRUSH Theme::s_hDarkComboSelBrush = nullptr;
@@ -38,24 +41,34 @@ HPEN Theme::s_hDarkCheckboxBorderPen = nullptr;
 HPEN Theme::s_hAccentPen = nullptr;
 HPEN Theme::s_hWhiteCheckPen = nullptr;
 
-static const COLORREF COLOR_DARK_BG = RGB(32, 32, 32);
-static const COLORREF COLOR_DARK_CTRL = RGB(45, 45, 45);
-static const COLORREF COLOR_DARK_TEXT = RGB(245, 245, 245);
-static const COLORREF COLOR_DARK_SUBTEXT = RGB(175, 175, 175);
+static constexpr COLORREF COLOR_DARK_BG = RGB(32, 32, 32);
+static constexpr COLORREF COLOR_DARK_CTRL = RGB(45, 45, 45);
+static constexpr COLORREF COLOR_DARK_TEXT = RGB(245, 245, 245);
+static constexpr COLORREF COLOR_DARK_SUBTEXT = RGB(175, 175, 175);
 
 void Theme::Initialize() {
+    if (s_initialized) return;
+    s_initialized = true;
+
     HMODULE hUxTheme = GetModuleHandleW(L"uxtheme.dll");
     if (!hUxTheme) hUxTheme = LoadLibraryW(L"uxtheme.dll");
 
     if (hUxTheme) {
-        s_fnSetPreferredAppMode = reinterpret_cast<pfnSetPreferredAppMode>(GetProcAddress(hUxTheme, MAKEINTRESOURCEA(135)));
-        s_fnAllowDarkModeForWindow = reinterpret_cast<pfnAllowDarkModeForWindow>(GetProcAddress(hUxTheme, MAKEINTRESOURCEA(133)));
-        s_fnShouldAppsUseDarkMode = reinterpret_cast<pfnShouldAppsUseDarkMode>(GetProcAddress(hUxTheme, MAKEINTRESOURCEA(132)));
+        s_fnSetPreferredAppMode = reinterpret_cast<pfnSetPreferredAppMode>(reinterpret_cast<void*>(GetProcAddress(hUxTheme, MAKEINTRESOURCEA(135))));
+        s_fnAllowDarkModeForWindow = reinterpret_cast<pfnAllowDarkModeForWindow>(reinterpret_cast<void*>(GetProcAddress(hUxTheme, MAKEINTRESOURCEA(133))));
+        s_fnShouldAppsUseDarkMode = reinterpret_cast<pfnShouldAppsUseDarkMode>(reinterpret_cast<void*>(GetProcAddress(hUxTheme, MAKEINTRESOURCEA(132))));
 
         if (s_fnSetPreferredAppMode) {
             s_fnSetPreferredAppMode(AllowDark);
         }
     }
+
+    s_isDarkMode = QuerySystemDarkMode();
+}
+
+void Theme::EnsureResources() {
+    Initialize();
+    if (!s_isDarkMode) return;
 
     if (!s_hDarkBgBrush) s_hDarkBgBrush = CreateSolidBrush(COLOR_DARK_BG);
     if (!s_hDarkCtrlBrush) s_hDarkCtrlBrush = CreateSolidBrush(COLOR_DARK_CTRL);
@@ -70,8 +83,8 @@ void Theme::Initialize() {
     if (!s_hWhiteCheckPen) s_hWhiteCheckPen = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
 }
 
-void Theme::Cleanup() {
-    auto SafeDeleteObj = [](auto& hObj) {
+void Theme::ReleaseResources() {
+    auto SafeDeleteObj = [](auto& hObj) noexcept {
         if (hObj) {
             DeleteObject(hObj);
             hObj = nullptr;
@@ -91,12 +104,16 @@ void Theme::Cleanup() {
     SafeDeleteObj(s_hWhiteCheckPen);
 }
 
-bool Theme::IsSystemDarkMode() {
+void Theme::Cleanup() {
+    ReleaseResources();
+}
+
+bool Theme::QuerySystemDarkMode() {
     if (s_fnShouldAppsUseDarkMode) {
         return s_fnShouldAppsUseDarkMode() != FALSE;
     }
 
-    HKEY hKey;
+    HKEY hKey = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
         DWORD appsUseLightTheme = 1;
         DWORD bufferSize = sizeof(appsUseLightTheme);
@@ -112,7 +129,7 @@ bool Theme::IsSystemDarkMode() {
 void Theme::ApplyWindowTheme(HWND hwnd) {
     if (!hwnd || !IsWindow(hwnd)) return;
 
-    BOOL darkMode = IsSystemDarkMode() ? TRUE : FALSE;
+    const BOOL darkMode = s_isDarkMode ? TRUE : FALSE;
 
     HRESULT hr = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &darkMode, sizeof(darkMode));
     if (FAILED(hr)) {
@@ -129,7 +146,15 @@ void Theme::ApplyWindowTheme(HWND hwnd) {
 void Theme::ApplyThemeToWindowAndChildren(HWND hwndParent) {
     if (!hwndParent || !IsWindow(hwndParent)) return;
 
-    bool dark = IsSystemDarkMode();
+    Initialize();
+    s_isDarkMode = QuerySystemDarkMode();
+    if (s_isDarkMode) {
+        EnsureResources();
+    } else {
+        ReleaseResources();
+    }
+
+    const bool dark = s_isDarkMode;
     ApplyWindowTheme(hwndParent);
 
     HWND hChild = GetWindow(hwndParent, GW_CHILD);
@@ -138,11 +163,12 @@ void Theme::ApplyThemeToWindowAndChildren(HWND hwndParent) {
             s_fnAllowDarkModeForWindow(hChild, dark ? TRUE : FALSE);
         }
 
-        wchar_t className[64] = { 0 };
+        wchar_t className[64] = {};
         GetClassNameW(hChild, className, 64);
         if (_wcsicmp(className, L"ComboBox") == 0) {
             SetWindowTheme(hChild, dark ? L"DarkMode_CFD" : nullptr, nullptr);
-            COMBOBOXINFO cbi = { sizeof(COMBOBOXINFO) };
+            COMBOBOXINFO cbi = {};
+            cbi.cbSize = sizeof(COMBOBOXINFO);
             if (GetComboBoxInfo(hChild, &cbi)) {
                 if (cbi.hwndList) {
                     if (s_fnAllowDarkModeForWindow) s_fnAllowDarkModeForWindow(cbi.hwndList, dark ? TRUE : FALSE);
@@ -168,27 +194,22 @@ void Theme::ApplyThemeToWindowAndChildren(HWND hwndParent) {
 void Theme::HandleSettingChange(HWND hwnd, LPARAM lParam) {
     if (lParam) {
         auto* str = reinterpret_cast<LPCWSTR>(lParam);
-        if (wcscmp(str, L"ImmersiveColorSet") == 0 || wcscmp(str, L"WindowsTheme") == 0) {
-            ApplyThemeToWindowAndChildren(hwnd);
+        if (wcscmp(str, L"ImmersiveColorSet") != 0 && wcscmp(str, L"WindowsTheme") != 0) {
+            return;
         }
-    } else {
-        ApplyThemeToWindowAndChildren(hwnd);
     }
+
+    const bool wasDark = s_isDarkMode;
+    const bool nowDark = QuerySystemDarkMode();
+    if (lParam != 0 && wasDark == nowDark) {
+        return;
+    }
+
+    s_isDarkMode = nowDark;
+    ApplyThemeToWindowAndChildren(hwnd);
 }
 
-HBRUSH Theme::GetDarkBackgroundBrush() { return s_hDarkBgBrush; }
-HBRUSH Theme::GetDarkControlBrush() { return s_hDarkCtrlBrush; }
-HBRUSH Theme::GetDarkComboSelectionBrush() { return s_hDarkComboSelBrush; }
-HBRUSH Theme::GetAccentBrush() { return s_hAccentBrush; }
-
-HPEN Theme::GetDarkEditBorderPen() { return s_hDarkEditBorderPen; }
-HPEN Theme::GetDarkComboBorderPen() { return s_hDarkComboBorderPen; }
-HPEN Theme::GetDarkComboArrowPen() { return s_hDarkComboArrowPen; }
-HPEN Theme::GetDarkCheckboxBorderPen() { return s_hDarkCheckboxBorderPen; }
-HPEN Theme::GetAccentPen() { return s_hAccentPen; }
-HPEN Theme::GetWhiteCheckPen() { return s_hWhiteCheckPen; }
-
-COLORREF Theme::GetDarkBackgroundColor() { return COLOR_DARK_BG; }
-COLORREF Theme::GetDarkControlColor() { return COLOR_DARK_CTRL; }
-COLORREF Theme::GetDarkTextColor() { return COLOR_DARK_TEXT; }
-COLORREF Theme::GetDarkSubtextColor() { return COLOR_DARK_SUBTEXT; }
+COLORREF Theme::GetDarkBackgroundColor() noexcept { return COLOR_DARK_BG; }
+COLORREF Theme::GetDarkControlColor() noexcept { return COLOR_DARK_CTRL; }
+COLORREF Theme::GetDarkTextColor() noexcept { return COLOR_DARK_TEXT; }
+COLORREF Theme::GetDarkSubtextColor() noexcept { return COLOR_DARK_SUBTEXT; }

@@ -2,13 +2,16 @@
 
 #include <windows.h>
 #include <shellapi.h>
-#include <functional>
-#include <string>
 
 class TrayIcon {
 public:
-    TrayIcon(HWND messageHwnd, UINT callbackMsg);
+    using Callback = void(*)(void* context);
+
+    TrayIcon(HWND messageHwnd, UINT callbackMsg) noexcept;
     ~TrayIcon();
+
+    TrayIcon(const TrayIcon&) = delete;
+    TrayIcon& operator=(const TrayIcon&) = delete;
 
     bool Add(HICON hIcon, const wchar_t* tooltip);
     void Remove();
@@ -17,10 +20,16 @@ public:
     void OnTaskbarCreated();
     void OnRetryTimer();
     void EnsureAdded();
-    bool IsAdded() const { return m_added; }
+    bool IsAdded() const noexcept { return m_added; }
 
-    void SetOnSettingsClicked(std::function<void()> callback) { m_onSettings = callback; }
-    void SetOnExitClicked(std::function<void()> callback) { m_onExit = callback; }
+    void SetOnSettingsClicked(Callback callback, void* context) noexcept {
+        m_onSettings = callback;
+        m_onSettingsCtx = context;
+    }
+    void SetOnExitClicked(Callback callback, void* context) noexcept {
+        m_onExit = callback;
+        m_onExitCtx = context;
+    }
 
 private:
     bool TryAdd();
@@ -30,12 +39,14 @@ private:
 
     HWND m_hwnd = nullptr;
     UINT m_callbackMsg = 0;
-    NOTIFYICONDATAW m_nid = { sizeof(m_nid) };
+    NOTIFYICONDATAW m_nid = {};
     bool m_added = false;
     int m_retryCount = 0;
     HICON m_savedIcon = nullptr;
-    std::wstring m_savedTooltip;
+    wchar_t m_savedTooltip[128] = {};
 
-    std::function<void()> m_onSettings = nullptr;
-    std::function<void()> m_onExit = nullptr;
+    Callback m_onSettings = nullptr;
+    void* m_onSettingsCtx = nullptr;
+    Callback m_onExit = nullptr;
+    void* m_onExitCtx = nullptr;
 };

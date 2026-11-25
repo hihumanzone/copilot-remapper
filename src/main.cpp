@@ -1,7 +1,7 @@
 #include <windows.h>
-#include <commctrl.h>
 #include <shellapi.h>
-#include <iostream>
+#include <string>
+#include <string_view>
 #include "resource.h"
 #include "Config.hpp"
 #include "ActionRunner.hpp"
@@ -12,18 +12,27 @@
 #include "SingleInstance.hpp"
 #include "Theme.hpp"
 
+#ifdef _MSC_VER
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
+#pragma comment(lib, "uuid.lib")
+#pragma comment(lib, "taskschd.lib")
+#endif
 
-static SettingsWindow* g_pSettingsWindow = nullptr;
-static TrayIcon* g_pTrayIcon = nullptr;
-static UINT g_uMsgTaskbarCreated = 0;
+namespace {
 
-static void SetupConsoleOutput() {
+SettingsWindow* g_pSettingsWindow = nullptr;
+TrayIcon* g_pTrayIcon = nullptr;
+UINT g_uMsgTaskbarCreated = 0;
+
+void SetupConsoleOutput() {
     HANDLE hExistingOut = GetStdHandle(STD_OUTPUT_HANDLE);
     if (!hExistingOut || hExistingOut == INVALID_HANDLE_VALUE) {
         if (AttachConsole(ATTACH_PARENT_PROCESS)) {
@@ -39,7 +48,7 @@ static void SetupConsoleOutput() {
     }
 }
 
-static void OutputConsole(const std::wstring& text) {
+void OutputConsole(std::wstring_view text) {
     SetupConsoleOutput();
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
     if (!hOut || hOut == INVALID_HANDLE_VALUE) {
@@ -49,27 +58,25 @@ static void OutputConsole(const std::wstring& text) {
         DWORD mode = 0;
         if (GetConsoleMode(hOut, &mode)) {
             DWORD written = 0;
-            WriteConsoleW(hOut, text.c_str(), static_cast<DWORD>(text.length()), &written, nullptr);
+            WriteConsoleW(hOut, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
             return;
-        } else {
+        }
+        const int size = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+        if (size > 0) {
+            std::string utf8(static_cast<size_t>(size), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), utf8.data(), size, nullptr, nullptr);
             DWORD written = 0;
-            int size = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.length()), nullptr, 0, nullptr, nullptr);
-            if (size > 0) {
-                std::string utf8(size, 0);
-                WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.length()), &utf8[0], size, nullptr, nullptr);
-                WriteFile(hOut, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
-                FlushFileBuffers(hOut);
-            }
-            return;
+            WriteFile(hOut, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+            FlushFileBuffers(hOut);
         }
     }
 }
 
-static void EnableHighDpi() {
+void EnableHighDpi() noexcept {
     HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
     if (hUser32) {
-        typedef BOOL(WINAPI* SetProcessDpiAwarenessContextProc)(DPI_AWARENESS_CONTEXT);
-        auto pSetDpi = reinterpret_cast<SetProcessDpiAwarenessContextProc>(GetProcAddress(hUser32, "SetProcessDpiAwarenessContext"));
+        using SetProcessDpiAwarenessContextProc = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+        auto pSetDpi = reinterpret_cast<SetProcessDpiAwarenessContextProc>(reinterpret_cast<void*>(GetProcAddress(hUser32, "SetProcessDpiAwarenessContext")));
         if (pSetDpi) {
             pSetDpi(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             return;
@@ -78,7 +85,7 @@ static void EnableHighDpi() {
     SetProcessDPIAware();
 }
 
-static LRESULT CALLBACK MessageWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+LRESULT CALLBACK MessageWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (g_uMsgTaskbarCreated != 0 && uMsg == g_uMsgTaskbarCreated) {
         if (g_pTrayIcon) {
             g_pTrayIcon->OnTaskbarCreated();
@@ -116,7 +123,7 @@ static LRESULT CALLBACK MessageWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         return 0;
 
     case WM_COMMAND: {
-        WORD id = LOWORD(wParam);
+        const WORD id = LOWORD(wParam);
         if (id == IDM_TRAY_SETTINGS && g_pSettingsWindow) {
             g_pSettingsWindow->Show();
         } else if (id == IDM_TRAY_EXIT) {
@@ -130,16 +137,16 @@ static LRESULT CALLBACK MessageWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         return 0;
 
     default:
-        return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+        break;
     }
     return DefWindowProcW(hwnd, uMsg, wParam, lParam);
 }
 
-static bool IsCurrentProcessElevated() {
+bool IsCurrentProcessElevated() noexcept {
     BOOL isElevated = FALSE;
     HANDLE hToken = nullptr;
     if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
-        TOKEN_ELEVATION elevation = { 0 };
+        TOKEN_ELEVATION elevation = {};
         DWORD dwSize = sizeof(elevation);
         if (GetTokenInformation(hToken, TokenElevation, &elevation, sizeof(elevation), &dwSize)) {
             isElevated = elevation.TokenIsElevated;
@@ -149,35 +156,30 @@ static bool IsCurrentProcessElevated() {
     return isElevated != FALSE;
 }
 
+} // namespace
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int nCmdShow) {
-    EnableHighDpi();
-
-    INITCOMMONCONTROLSEX icex = { sizeof(icex) };
-    icex.dwICC = ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES | ICC_BAR_CLASSES;
-    InitCommonControlsEx(&icex);
-
-    Theme::Initialize();
-
     bool startMinimized = false;
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
 
     if (argv) {
         for (int i = 1; i < argc; ++i) {
-            std::wstring arg = argv[i];
-            if (_wcsicmp(arg.c_str(), L"--silent") == 0 || _wcsicmp(arg.c_str(), L"-s") == 0) {
+            const wchar_t* arg = argv[i];
+            if (_wcsicmp(arg, L"--silent") == 0 || _wcsicmp(arg, L"-s") == 0) {
                 startMinimized = true;
-            } else if (_wcsicmp(arg.c_str(), L"--test") == 0 || _wcsicmp(arg.c_str(), L"-t") == 0) {
+            } else if (_wcsicmp(arg, L"--test") == 0 || _wcsicmp(arg, L"-t") == 0) {
                 AppConfig cfg = ConfigManager::Load();
-                OutputConsole(L"[Self-Test] Configuration loaded: " + cfg.actionType + L" -> " + cfg.targetPath + L"\n");
+                std::wstring line = L"[Self-Test] Configuration loaded: " + cfg.actionType + L" -> " + cfg.targetPath + L"\n";
+                OutputConsole(line);
                 LocalFree(argv);
                 return 0;
-            } else if (_wcsicmp(arg.c_str(), L"--install-startup") == 0) {
+            } else if (_wcsicmp(arg, L"--install-startup") == 0) {
                 ConfigManager::SetStartup(true);
                 OutputConsole(L"Startup enabled.\n");
                 LocalFree(argv);
                 return 0;
-            } else if (_wcsicmp(arg.c_str(), L"--uninstall-startup") == 0) {
+            } else if (_wcsicmp(arg, L"--uninstall-startup") == 0) {
                 ConfigManager::SetStartup(false);
                 OutputConsole(L"Startup disabled.\n");
                 LocalFree(argv);
@@ -188,9 +190,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int nCmdSh
     }
 
     if (!IsCurrentProcessElevated()) {
-        wchar_t szExe[MAX_PATH];
-        if (GetModuleFileNameW(nullptr, szExe, MAX_PATH)) {
-            SHELLEXECUTEINFOW sei = { sizeof(sei) };
+        wchar_t szExe[1024];
+        if (GetModuleFileNameW(nullptr, szExe, 1024)) {
+            SHELLEXECUTEINFOW sei = {};
+            sei.cbSize = sizeof(sei);
             sei.lpVerb = L"runas";
             sei.lpFile = szExe;
             sei.lpParameters = lpCmdLine;
@@ -207,11 +210,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int nCmdSh
         return 0;
     }
 
+    EnableHighDpi();
+    Theme::Initialize();
     IconHelper::Initialize();
 
-    // Register message window class
-    const wchar_t CLASS_NAME[] = L"CopilotRemapperMessageWindowClass";
-    WNDCLASSEXW wc = { sizeof(wc) };
+    // Warm config cache once before hook starts so first keypress has 0 disk I/O
+    ConfigManager::GetResolvedSnapshot();
+
+    constexpr wchar_t CLASS_NAME[] = L"CopilotRemapperMessageWindowClass";
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = MessageWndProc;
     wc.hInstance = hInstance;
     wc.lpszClassName = CLASS_NAME;
@@ -221,22 +229,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int nCmdSh
 
     g_uMsgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
-    // Allow TaskbarCreated and WM_APP_TRAY_CALLBACK across UIPI integrity boundaries (Explorer is Medium IL, we are High IL)
-    typedef BOOL(WINAPI* pfnChangeWindowMessageFilterEx)(HWND, UINT, DWORD, void*);
-    typedef BOOL(WINAPI* pfnChangeWindowMessageFilter)(UINT, DWORD);
-    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
-    if (hUser32) {
-        auto pChangeFilterEx = reinterpret_cast<pfnChangeWindowMessageFilterEx>(GetProcAddress(hUser32, "ChangeWindowMessageFilterEx"));
-        if (pChangeFilterEx) {
-            pChangeFilterEx(hMsgWnd, g_uMsgTaskbarCreated, 1 /* MSGFLT_ALLOW */, nullptr);
-            pChangeFilterEx(hMsgWnd, WM_APP_TRAY_CALLBACK, 1 /* MSGFLT_ALLOW */, nullptr);
-        }
-        auto pChangeFilter = reinterpret_cast<pfnChangeWindowMessageFilter>(GetProcAddress(hUser32, "ChangeWindowMessageFilter"));
-        if (pChangeFilter) {
-            pChangeFilter(g_uMsgTaskbarCreated, 1 /* MSGFLT_ADD */);
-            pChangeFilter(WM_APP_TRAY_CALLBACK, 1 /* MSGFLT_ADD */);
-        }
-    }
+    // Allow TaskbarCreated and WM_APP_TRAY_CALLBACK across UIPI integrity boundaries
+    ChangeWindowMessageFilterEx(hMsgWnd, g_uMsgTaskbarCreated, MSGFLT_ALLOW, nullptr);
+    ChangeWindowMessageFilterEx(hMsgWnd, WM_APP_TRAY_CALLBACK, MSGFLT_ALLOW, nullptr);
 
     SettingsWindow settingsWindow;
     g_pSettingsWindow = &settingsWindow;
@@ -244,22 +239,26 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int nCmdSh
     TrayIcon trayIcon(hMsgWnd, WM_APP_TRAY_CALLBACK);
     g_pTrayIcon = &trayIcon;
 
-    trayIcon.SetOnSettingsClicked([&settingsWindow]() {
-        settingsWindow.Show();
-    });
-    trayIcon.SetOnExitClicked([]() {
+    trayIcon.SetOnSettingsClicked([](void* ctx) {
+        static_cast<SettingsWindow*>(ctx)->Show();
+    }, &settingsWindow);
+    trayIcon.SetOnExitClicked([](void*) {
         PostQuitMessage(0);
-    });
-    trayIcon.Add(IconHelper::GetAppIcon(), L"Copilot Key Remapper");
+    }, nullptr);
+    trayIcon.Add(IconHelper::GetSmallAppIcon(), L"Copilot Key Remapper");
+
+    ActionRunner::Initialize();
 
     KeyboardHook hook;
-    hook.SetCallback([hMsgWnd]() {
-        PostMessageW(hMsgWnd, WM_APP_COPILOT_PRESSED, 0, 0);
-    });
+    hook.SetCallback([](void* ctx) {
+        if (SettingsWindow::IsOpen()) {
+            PostMessageW(static_cast<HWND>(ctx), WM_APP_COPILOT_PRESSED, 0, 0);
+        }
+    }, hMsgWnd);
 
-    singleInstance.StartWakeupListener([hMsgWnd]() {
-        PostMessageW(hMsgWnd, WM_APP_WAKEUP, 0, 0);
-    });
+    singleInstance.StartWakeupListener([](void* ctx) {
+        PostMessageW(static_cast<HWND>(ctx), WM_APP_WAKEUP, 0, 0);
+    }, hMsgWnd);
 
     if (!startMinimized) {
         settingsWindow.Show();
@@ -268,8 +267,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int nCmdSh
     }
 
     MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0)) {
-        if (settingsWindow.GetHwnd() && IsWindow(settingsWindow.GetHwnd()) && IsDialogMessageW(settingsWindow.GetHwnd(), &msg)) {
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        HWND hSettings = settingsWindow.GetHwnd();
+        if (hSettings && IsDialogMessageW(hSettings, &msg)) {
             continue;
         }
         TranslateMessage(&msg);
@@ -278,6 +278,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int nCmdSh
 
     trayIcon.Remove();
     hook.Uninstall();
+    ActionRunner::Shutdown();
     singleInstance.StopWakeupListener();
     IconHelper::Shutdown();
     Theme::Cleanup();

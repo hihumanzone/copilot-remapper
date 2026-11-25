@@ -1,72 +1,45 @@
 #include "SettingsWindow.hpp"
 #include "ActionRunner.hpp"
+#include "ComHelpers.hpp"
 #include "IconHelper.hpp"
 #include "Theme.hpp"
 #include "../resource.h"
 #include <commctrl.h>
-#include <commdlg.h>
+#include <shobjidl.h>
 #include <uxtheme.h>
-#include <vector>
+#include <iterator>
+#include <string>
 
-SettingsWindow::SettingsWindow() {
-}
+std::atomic<bool> SettingsWindow::s_isOpen{ false };
 
-SettingsWindow::~SettingsWindow() {
-    if (m_hwnd && IsWindow(m_hwnd)) {
-        DestroyWindow(m_hwnd);
-        m_hwnd = nullptr;
+namespace {
+
+void EnsureCommonControls() noexcept {
+    static bool s_initialized = false;
+    if (!s_initialized) {
+        INITCOMMONCONTROLSEX icex = {};
+        icex.dwSize = sizeof(icex);
+        icex.dwICC = ICC_STANDARD_CLASSES;
+        InitCommonControlsEx(&icex);
+        s_initialized = true;
     }
 }
 
-void SettingsWindow::Show() {
-    if (!m_hwnd || !IsWindow(m_hwnd)) {
-        HINSTANCE hInst = GetModuleHandleW(nullptr);
-        m_hwnd = CreateDialogParamW(hInst, MAKEINTRESOURCEW(IDD_SETTINGS_DIALOG), nullptr, DialogProc, reinterpret_cast<LPARAM>(this));
-    }
-    ShowWindow(m_hwnd, SW_SHOW);
-    ShowWindow(m_hwnd, SW_RESTORE);
-    SetWindowPos(m_hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-    SetForegroundWindow(m_hwnd);
-    SetActiveWindow(m_hwnd);
-}
-
-void SettingsWindow::Hide() {
-    if (m_hwnd && IsWindow(m_hwnd)) {
-        ShowWindow(m_hwnd, SW_HIDE);
-        // Trim working set pages to standby list when minimized to tray
-        SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
-    }
-}
-
-bool SettingsWindow::IsVisible() const {
-    return m_hwnd && IsWindow(m_hwnd) && IsWindowVisible(m_hwnd);
-}
-
-void SettingsWindow::OnCopilotKeyPressed() {
-    if (m_hwnd && IsWindow(m_hwnd)) {
-        PostMessageW(m_hwnd, WM_APP_COPILOT_PRESSED, 0, 0);
-    }
-}
-
-void SettingsWindow::Wakeup() {
-    Show();
-}
-
-static void CenterEditText(HWND hEdit) {
-    RECT rc;
+void CenterEditText(HWND hEdit) noexcept {
+    RECT rc = {};
     GetClientRect(hEdit, &rc);
-    int clientH = rc.bottom - rc.top;
+    const int clientH = rc.bottom - rc.top;
 
     HDC hdc = GetDC(hEdit);
     HFONT hFont = reinterpret_cast<HFONT>(SendMessageW(hEdit, WM_GETFONT, 0, 0));
     HGDIOBJ hOld = SelectObject(hdc, hFont ? hFont : GetStockObject(DEFAULT_GUI_FONT));
-    TEXTMETRIC tm;
-    GetTextMetrics(hdc, &tm);
+    TEXTMETRICW tm = {};
+    GetTextMetricsW(hdc, &tm);
     SelectObject(hdc, hOld);
     ReleaseDC(hEdit, hdc);
 
-    int fontH = tm.tmHeight;
-    int padY = (clientH > fontH) ? (clientH - fontH) / 2 : 0;
+    const int fontH = tm.tmHeight;
+    const int padY = (clientH > fontH) ? (clientH - fontH) / 2 : 0;
     rc.top = padY;
     rc.bottom = padY + fontH;
     rc.left = 5;
@@ -74,23 +47,86 @@ static void CenterEditText(HWND hEdit) {
     SendMessageW(hEdit, EM_SETRECT, 0, reinterpret_cast<LPARAM>(&rc));
 }
 
-LRESULT CALLBACK SettingsWindow::GroupBoxSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/) {
+} // namespace
+
+SettingsWindow::~SettingsWindow() {
+    if (m_hwnd && IsWindow(m_hwnd)) {
+        DestroyWindow(m_hwnd);
+        m_hwnd = nullptr;
+    }
+    s_isOpen.store(false, std::memory_order_relaxed);
+}
+
+void SettingsWindow::Show() {
+    EnsureCommonControls();
+    Theme::EnsureResources();
+
+    if (!m_hwnd || !IsWindow(m_hwnd)) {
+        HINSTANCE hInst = GetModuleHandleW(nullptr);
+        m_hwnd = CreateDialogParamW(hInst, MAKEINTRESOURCEW(IDD_SETTINGS_DIALOG), nullptr, DialogProc, reinterpret_cast<LPARAM>(this));
+    }
+    if (m_hwnd) {
+        s_isOpen.store(true, std::memory_order_relaxed);
+        ShowWindow(m_hwnd, SW_SHOW);
+        if (IsIconic(m_hwnd)) {
+            ShowWindow(m_hwnd, SW_RESTORE);
+        }
+        SetWindowPos(m_hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        SetForegroundWindow(m_hwnd);
+        SetActiveWindow(m_hwnd);
+    }
+}
+
+void SettingsWindow::Hide() {
+    s_isOpen.store(false, std::memory_order_relaxed);
+    if (m_hwnd && IsWindow(m_hwnd)) {
+        DestroyWindow(m_hwnd);
+        m_hwnd = nullptr;
+    }
+    Theme::ReleaseResources();
+    SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
+}
+
+bool SettingsWindow::IsVisible() const noexcept {
+    return m_hwnd && IsWindow(m_hwnd) && IsWindowVisible(m_hwnd);
+}
+
+void SettingsWindow::OnCopilotKeyPressed() {
+    if (m_hwnd && IsWindow(m_hwnd)) {
+        SYSTEMTIME st = {};
+        GetLocalTime(&st);
+        wchar_t buf[128];
+        swprintf_s(buf, L"Copilot key pressed at %02u:%02u:%02u! Action executed.", st.wHour, st.wMinute, st.wSecond);
+        SetDlgItemTextW(m_hwnd, IDC_STATUSBAR, buf);
+    }
+}
+
+void SettingsWindow::Wakeup() {
+    Show();
+}
+
+LRESULT CALLBACK SettingsWindow::GroupBoxSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR /*dwRefData*/) {
+    if (uMsg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, GroupBoxSubclassProc, uIdSubclass);
+        return DefSubclassProc(hwnd, uMsg, wParam, lParam);
+    }
+
     if (uMsg == WM_PAINT && Theme::IsSystemDarkMode()) {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
 
         DefSubclassProc(hwnd, uMsg, reinterpret_cast<WPARAM>(hdc), lParam);
 
-        wchar_t text[128] = { 0 };
-        GetWindowTextW(hwnd, text, 128);
+        wchar_t text[128] = {};
+        GetWindowTextW(hwnd, text, static_cast<int>(std::size(text)));
         if (text[0] != L'\0') {
             HFONT hFont = reinterpret_cast<HFONT>(SendMessageW(hwnd, WM_GETFONT, 0, 0));
             HGDIOBJ hOldFont = SelectObject(hdc, hFont ? hFont : GetStockObject(DEFAULT_GUI_FONT));
 
-            RECT rcText = { 0 };
+            RECT rcText = {};
             DrawTextW(hdc, text, -1, &rcText, DT_CALCRECT | DT_SINGLELINE);
-            int textW = rcText.right - rcText.left;
-            int textH = rcText.bottom - rcText.top;
+            const int textW = rcText.right - rcText.left;
+            const int textH = rcText.bottom - rcText.top;
 
             RECT rcBg = { 8, 0, 8 + textW + 6, textH };
             FillRect(hdc, &rcBg, Theme::GetDarkBackgroundBrush());
@@ -109,17 +145,20 @@ LRESULT CALLBACK SettingsWindow::GroupBoxSubclassProc(HWND hwnd, UINT uMsg, WPAR
     return DefSubclassProc(hwnd, uMsg, wParam, lParam);
 }
 
-LRESULT CALLBACK SettingsWindow::EditSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/) {
+LRESULT CALLBACK SettingsWindow::EditSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR /*dwRefData*/) {
     switch (uMsg) {
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(hwnd, EditSubclassProc, uIdSubclass);
+        break;
+
     case WM_NCPAINT: {
         if (Theme::IsSystemDarkMode()) {
             HDC hdc = GetWindowDC(hwnd);
             if (hdc) {
-                RECT rc;
+                RECT rc = {};
                 GetWindowRect(hwnd, &rc);
                 OffsetRect(&rc, -rc.left, -rc.top);
 
-                // Use pre-cached border pen (0 GDI object allocations)
                 HGDIOBJ oldPen = SelectObject(hdc, Theme::GetDarkEditBorderPen());
                 HGDIOBJ oldBr = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
                 Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
@@ -163,12 +202,17 @@ LRESULT CALLBACK SettingsWindow::EditSubclassProc(HWND hwnd, UINT uMsg, WPARAM w
     return DefSubclassProc(hwnd, uMsg, wParam, lParam);
 }
 
-LRESULT CALLBACK SettingsWindow::ComboBoxSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/) {
+LRESULT CALLBACK SettingsWindow::ComboBoxSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR /*dwRefData*/) {
+    if (uMsg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, ComboBoxSubclassProc, uIdSubclass);
+        return DefSubclassProc(hwnd, uMsg, wParam, lParam);
+    }
+
     if (uMsg == WM_PAINT && Theme::IsSystemDarkMode()) {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
 
-        RECT rc;
+        RECT rc = {};
         GetClientRect(hwnd, &rc);
 
         FillRect(hdc, &rc, Theme::GetDarkControlBrush());
@@ -179,9 +223,9 @@ LRESULT CALLBACK SettingsWindow::ComboBoxSubclassProc(HWND hwnd, UINT uMsg, WPAR
         SelectObject(hdc, hOldBrush);
         SelectObject(hdc, hOldPen);
 
-        int cur = static_cast<int>(SendMessageW(hwnd, CB_GETCURSEL, 0, 0));
+        const int cur = static_cast<int>(SendMessageW(hwnd, CB_GETCURSEL, 0, 0));
         if (cur >= 0) {
-            wchar_t text[256] = { 0 };
+            wchar_t text[256] = {};
             SendMessageW(hwnd, CB_GETLBTEXT, cur, reinterpret_cast<LPARAM>(text));
 
             HFONT hFont = reinterpret_cast<HFONT>(SendMessageW(hwnd, WM_GETFONT, 0, 0));
@@ -198,15 +242,15 @@ LRESULT CALLBACK SettingsWindow::ComboBoxSubclassProc(HWND hwnd, UINT uMsg, WPAR
             SelectObject(hdc, hOldFont);
         }
 
-        int arrowCenterX = rc.right - 14;
-        int arrowCenterY = (rc.top + rc.bottom) / 2;
-        SelectObject(hdc, Theme::GetDarkComboArrowPen());
+        const int arrowCenterX = rc.right - 14;
+        const int arrowCenterY = (rc.top + rc.bottom) / 2;
+        HGDIOBJ hOldArrowPen = SelectObject(hdc, Theme::GetDarkComboArrowPen());
 
         MoveToEx(hdc, arrowCenterX - 4, arrowCenterY - 2, nullptr);
         LineTo(hdc, arrowCenterX, arrowCenterY + 2);
         LineTo(hdc, arrowCenterX + 5, arrowCenterY - 3);
 
-        SelectObject(hdc, GetStockObject(BLACK_PEN));
+        SelectObject(hdc, hOldArrowPen);
 
         EndPaint(hwnd, &ps);
         return 0;
@@ -214,20 +258,25 @@ LRESULT CALLBACK SettingsWindow::ComboBoxSubclassProc(HWND hwnd, UINT uMsg, WPAR
     return DefSubclassProc(hwnd, uMsg, wParam, lParam);
 }
 
-LRESULT CALLBACK SettingsWindow::CheckboxSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/) {
+LRESULT CALLBACK SettingsWindow::CheckboxSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR /*dwRefData*/) {
+    if (uMsg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, CheckboxSubclassProc, uIdSubclass);
+        return DefSubclassProc(hwnd, uMsg, wParam, lParam);
+    }
+
     if (uMsg == WM_PAINT && Theme::IsSystemDarkMode()) {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
 
-        RECT rc;
+        RECT rc = {};
         GetClientRect(hwnd, &rc);
 
         FillRect(hdc, &rc, Theme::GetDarkBackgroundBrush());
 
-        bool isChecked = (SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        const bool isChecked = (SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
-        int boxSize = 18;
-        int boxX = 0;
+        constexpr int boxSize = 18;
+        constexpr int boxX = 0;
         int boxY = (rc.bottom - rc.top - boxSize) / 2;
         if (boxY < 0) boxY = 0;
         RECT rcBox = { boxX, boxY, boxX + boxSize, boxY + boxSize };
@@ -253,8 +302,8 @@ LRESULT CALLBACK SettingsWindow::CheckboxSubclassProc(HWND hwnd, UINT uMsg, WPAR
             SelectObject(hdc, oldPen);
         }
 
-        wchar_t text[256] = { 0 };
-        GetWindowTextW(hwnd, text, 256);
+        wchar_t text[256] = {};
+        GetWindowTextW(hwnd, text, static_cast<int>(std::size(text)));
         if (text[0] != L'\0') {
             HFONT hFont = reinterpret_cast<HFONT>(SendMessageW(hwnd, WM_GETFONT, 0, 0));
             HGDIOBJ hOldFont = SelectObject(hdc, hFont ? hFont : GetStockObject(DEFAULT_GUI_FONT));
@@ -310,21 +359,20 @@ INT_PTR CALLBACK SettingsWindow::DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam,
         if (pDIS->CtlType == ODT_COMBOBOX) {
             HDC hdc = pDIS->hDC;
             RECT rc = pDIS->rcItem;
-            bool dark = Theme::IsSystemDarkMode();
-            bool isSelected = (pDIS->itemState & ODS_SELECTED);
+            const bool dark = Theme::IsSystemDarkMode();
+            const bool isSelected = (pDIS->itemState & ODS_SELECTED) != 0;
 
             if (dark) {
                 FillRect(hdc, &rc, isSelected ? Theme::GetDarkComboSelectionBrush() : Theme::GetDarkControlBrush());
             } else {
-                HBRUSH hSysBr = GetSysColorBrush(isSelected ? COLOR_HIGHLIGHT : COLOR_WINDOW);
-                FillRect(hdc, &rc, hSysBr);
+                FillRect(hdc, &rc, GetSysColorBrush(isSelected ? COLOR_HIGHLIGHT : COLOR_WINDOW));
             }
 
-            COLORREF fg = dark ? Theme::GetDarkTextColor()
-                               : (isSelected ? GetSysColor(COLOR_HIGHLIGHTTEXT) : GetSysColor(COLOR_WINDOWTEXT));
+            const COLORREF fg = dark ? Theme::GetDarkTextColor()
+                                     : (isSelected ? GetSysColor(COLOR_HIGHLIGHTTEXT) : GetSysColor(COLOR_WINDOWTEXT));
 
             if (pDIS->itemID != static_cast<UINT>(-1)) {
-                wchar_t text[256] = { 0 };
+                wchar_t text[256] = {};
                 SendMessageW(pDIS->hwndItem, CB_GETLBTEXT, pDIS->itemID, reinterpret_cast<LPARAM>(text));
 
                 SetBkMode(hdc, TRANSPARENT);
@@ -339,30 +387,24 @@ INT_PTR CALLBACK SettingsWindow::DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam,
         break;
     }
 
-    case WM_CTLCOLORDLG: {
+    case WM_CTLCOLORDLG:
         if (Theme::IsSystemDarkMode()) {
             return reinterpret_cast<INT_PTR>(Theme::GetDarkBackgroundBrush());
         }
         break;
-    }
 
-    case WM_CTLCOLORSTATIC: {
+    case WM_CTLCOLORSTATIC:
         if (Theme::IsSystemDarkMode()) {
             HDC hdc = reinterpret_cast<HDC>(wParam);
             HWND hCtrl = reinterpret_cast<HWND>(lParam);
-            if (GetDlgCtrlID(hCtrl) == IDC_STATUSBAR) {
-                SetTextColor(hdc, Theme::GetDarkSubtextColor());
-            } else {
-                SetTextColor(hdc, Theme::GetDarkTextColor());
-            }
+            SetTextColor(hdc, (GetDlgCtrlID(hCtrl) == IDC_STATUSBAR) ? Theme::GetDarkSubtextColor() : Theme::GetDarkTextColor());
             SetBkMode(hdc, TRANSPARENT);
             return reinterpret_cast<INT_PTR>(Theme::GetDarkBackgroundBrush());
         }
         break;
-    }
 
     case WM_CTLCOLOREDIT:
-    case WM_CTLCOLORLISTBOX: {
+    case WM_CTLCOLORLISTBOX:
         if (Theme::IsSystemDarkMode()) {
             HDC hdc = reinterpret_cast<HDC>(wParam);
             SetTextColor(hdc, Theme::GetDarkTextColor());
@@ -370,9 +412,8 @@ INT_PTR CALLBACK SettingsWindow::DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             return reinterpret_cast<INT_PTR>(Theme::GetDarkControlBrush());
         }
         break;
-    }
 
-    case WM_CTLCOLORBTN: {
+    case WM_CTLCOLORBTN:
         if (Theme::IsSystemDarkMode()) {
             HDC hdc = reinterpret_cast<HDC>(wParam);
             SetTextColor(hdc, Theme::GetDarkTextColor());
@@ -380,36 +421,39 @@ INT_PTR CALLBACK SettingsWindow::DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             return reinterpret_cast<INT_PTR>(Theme::GetDarkBackgroundBrush());
         }
         break;
-    }
 
     case WM_SETTINGCHANGE:
-    case WM_THEMECHANGED: {
+    case WM_THEMECHANGED:
         Theme::HandleSettingChange(hwnd, lParam);
         InvalidateRect(hwnd, nullptr, TRUE);
         return 0;
-    }
 
-    case WM_APP_COPILOT_PRESSED: {
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        wchar_t buf[128];
-        swprintf_s(buf, L"Copilot key pressed at %02d:%02d:%02d! Action executed.", st.wHour, st.wMinute, st.wSecond);
-        SetDlgItemTextW(hwnd, IDC_STATUSBAR, buf);
+    case WM_APP_COPILOT_PRESSED:
+        if (pThis) {
+            pThis->OnCopilotKeyPressed();
+        }
         return TRUE;
-    }
 
-    case WM_APP_WAKEUP: {
+    case WM_APP_WAKEUP:
         if (pThis) {
             pThis->Show();
         }
         return TRUE;
-    }
 
-    case WM_CLOSE: {
-        ShowWindow(hwnd, SW_HIDE);
-        SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
+    case WM_CLOSE:
+        if (pThis) {
+            pThis->Hide();
+        } else {
+            DestroyWindow(hwnd);
+        }
         return TRUE;
-    }
+
+    case WM_NCDESTROY:
+        s_isOpen.store(false, std::memory_order_relaxed);
+        if (pThis) {
+            pThis->m_hwnd = nullptr;
+        }
+        break;
 
     default:
         break;
@@ -418,13 +462,11 @@ INT_PTR CALLBACK SettingsWindow::DialogProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 }
 
 void SettingsWindow::OnInitDialog(HWND hwnd) {
-    HICON hIcon = IconHelper::GetAppIcon();
-    SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hIcon));
-    SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hIcon));
+    SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(IconHelper::GetAppIcon()));
+    SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(IconHelper::GetSmallAppIcon()));
 
     Theme::ApplyThemeToWindowAndChildren(hwnd);
 
-    // Subclass controls for dark mode styling
     SetWindowSubclass(GetDlgItem(hwnd, IDC_GROUP_ACTION), GroupBoxSubclassProc, 1, 0);
     SetWindowSubclass(GetDlgItem(hwnd, IDC_GROUP_OPTIONS), GroupBoxSubclassProc, 2, 0);
 
@@ -434,27 +476,23 @@ void SettingsWindow::OnInitDialog(HWND hwnd) {
     SetWindowSubclass(hEditArgs, EditSubclassProc, 4, 0);
 
     for (HWND hEdit : { hEditTarget, hEditArgs }) {
-        LONG_PTR exStyle = GetWindowLongPtrW(hEdit, GWL_EXSTYLE);
+        const LONG_PTR exStyle = GetWindowLongPtrW(hEdit, GWL_EXSTYLE);
         if (exStyle & WS_EX_CLIENTEDGE) {
             SetWindowLongPtrW(hEdit, GWL_EXSTYLE, exStyle & ~WS_EX_CLIENTEDGE);
         }
-        LONG_PTR style = GetWindowLongPtrW(hEdit, GWL_STYLE);
+        const LONG_PTR style = GetWindowLongPtrW(hEdit, GWL_STYLE);
         if (!(style & WS_BORDER)) {
             SetWindowLongPtrW(hEdit, GWL_STYLE, style | WS_BORDER);
         }
-        SetWindowTheme(hEdit, L"", L"");
         SetWindowPos(hEdit, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
     }
 
     HWND hCombo = GetDlgItem(hwnd, IDC_COMBO_ACTION);
     SetWindowSubclass(hCombo, ComboBoxSubclassProc, 5, 0);
 
-    HWND hCheckStartup = GetDlgItem(hwnd, IDC_CHECK_STARTUP);
-    HWND hCheckAdmin = GetDlgItem(hwnd, IDC_CHECK_ADMIN);
-    SetWindowSubclass(hCheckStartup, CheckboxSubclassProc, 6, 0);
-    SetWindowSubclass(hCheckAdmin, CheckboxSubclassProc, 7, 0);
+    SetWindowSubclass(GetDlgItem(hwnd, IDC_CHECK_STARTUP), CheckboxSubclassProc, 6, 0);
+    SetWindowSubclass(GetDlgItem(hwnd, IDC_CHECK_ADMIN), CheckboxSubclassProc, 7, 0);
 
-    // Populate action ComboBox
     SendMessageW(hCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Launch Application / File"));
     SendMessageW(hCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Open Website / URL"));
     SendMessageW(hCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Run PowerShell Command"));
@@ -477,11 +515,10 @@ void SettingsWindow::LoadConfigToUI() {
         SendMessageW(hCombo, CB_SETCURSEL, 0, 0);
     }
 
-    std::wstring target = m_config.targetPath.empty() ? L"wt.exe" : m_config.targetPath;
-    SetDlgItemTextW(m_hwnd, IDC_EDIT_TARGET, target.c_str());
+    const wchar_t* target = m_config.targetPath.empty() ? L"wt.exe" : m_config.targetPath.c_str();
+    SetDlgItemTextW(m_hwnd, IDC_EDIT_TARGET, target);
     SetDlgItemTextW(m_hwnd, IDC_EDIT_ARGS, m_config.arguments.c_str());
 
-    // Instant UI initialization using cached config (0 child process delay)
     CheckDlgButton(m_hwnd, IDC_CHECK_STARTUP, m_config.startWithWindows ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(m_hwnd, IDC_CHECK_ADMIN, m_config.runAsAdmin ? BST_CHECKED : BST_UNCHECKED);
 
@@ -490,93 +527,124 @@ void SettingsWindow::LoadConfigToUI() {
 
 void SettingsWindow::UpdateTargetPrompt() {
     HWND hCombo = GetDlgItem(m_hwnd, IDC_COMBO_ACTION);
-    int sel = static_cast<int>(SendMessageW(hCombo, CB_GETCURSEL, 0, 0));
+    const int sel = static_cast<int>(SendMessageW(hCombo, CB_GETCURSEL, 0, 0));
 
-    RECT rcFull = { 20, 59, 20 + 280, 59 + 12 };
-    RECT rcNarrow = { 20, 59, 20 + 224, 59 + 12 };
-    MapDialogRect(m_hwnd, &rcFull);
-    MapDialogRect(m_hwnd, &rcNarrow);
+    RECT rcTarget = (sel == 1 || sel == 2) ? RECT{ 20, 59, 20 + 280, 59 + 12 } : RECT{ 20, 59, 20 + 224, 59 + 12 };
+    MapDialogRect(m_hwnd, &rcTarget);
 
     HWND hTarget = GetDlgItem(m_hwnd, IDC_EDIT_TARGET);
     HWND hBrowse = GetDlgItem(m_hwnd, IDC_BTN_BROWSE);
+    HWND hLblArgs = GetDlgItem(m_hwnd, IDC_LBL_ARGS);
+    HWND hEditArgs = GetDlgItem(m_hwnd, IDC_EDIT_ARGS);
+    HWND hCheckAdmin = GetDlgItem(m_hwnd, IDC_CHECK_ADMIN);
 
-    wchar_t currentTarget[1024] = { 0 };
-    GetDlgItemTextW(m_hwnd, IDC_EDIT_TARGET, currentTarget, 1024);
-    std::wstring targetStr = currentTarget;
+    wchar_t currentTarget[1024] = {};
+    GetDlgItemTextW(m_hwnd, IDC_EDIT_TARGET, currentTarget, static_cast<int>(std::size(currentTarget)));
+    const bool startsWithHttp = (wcsncmp(currentTarget, L"http", 4) == 0);
 
-    if (sel == 1) { // URL
+    bool showBrowse = false;
+    bool showArgs = false;
+    bool showAdmin = true;
+
+    if (sel == 1) {
         SetDlgItemTextW(m_hwnd, IDC_LBL_TARGET, L"Website URL:");
-        if (targetStr.rfind(L"http", 0) != 0) {
+        if (!startsWithHttp) {
             SetDlgItemTextW(m_hwnd, IDC_EDIT_TARGET, L"https://claude.ai");
         }
-        ShowWindow(hBrowse, SW_HIDE);
-        SetWindowPos(hTarget, nullptr, rcFull.left, rcFull.top, rcFull.right - rcFull.left, rcFull.bottom - rcFull.top, SWP_NOZORDER | SWP_FRAMECHANGED);
-        CenterEditText(hTarget);
-        ShowWindow(GetDlgItem(m_hwnd, IDC_LBL_ARGS), SW_HIDE);
-        ShowWindow(GetDlgItem(m_hwnd, IDC_EDIT_ARGS), SW_HIDE);
-        ShowWindow(GetDlgItem(m_hwnd, IDC_CHECK_ADMIN), SW_HIDE);
-    } else if (sel == 2) { // PowerShell
+        showAdmin = false;
+    } else if (sel == 2) {
         SetDlgItemTextW(m_hwnd, IDC_LBL_TARGET, L"PowerShell command or script:");
-        if (targetStr.rfind(L"http", 0) == 0) {
+        if (startsWithHttp) {
             SetDlgItemTextW(m_hwnd, IDC_EDIT_TARGET, L"");
         }
-        ShowWindow(hBrowse, SW_HIDE);
-        SetWindowPos(hTarget, nullptr, rcFull.left, rcFull.top, rcFull.right - rcFull.left, rcFull.bottom - rcFull.top, SWP_NOZORDER | SWP_FRAMECHANGED);
-        CenterEditText(hTarget);
-        ShowWindow(GetDlgItem(m_hwnd, IDC_LBL_ARGS), SW_HIDE);
-        ShowWindow(GetDlgItem(m_hwnd, IDC_EDIT_ARGS), SW_HIDE);
-        ShowWindow(GetDlgItem(m_hwnd, IDC_CHECK_ADMIN), SW_SHOW);
-    } else { // Launch App
+    } else {
         SetDlgItemTextW(m_hwnd, IDC_LBL_TARGET, L"Application or file to open:");
-        if (targetStr.rfind(L"http", 0) == 0) {
+        if (startsWithHttp) {
             SetDlgItemTextW(m_hwnd, IDC_EDIT_TARGET, L"wt.exe");
         }
-        SetWindowPos(hTarget, nullptr, rcNarrow.left, rcNarrow.top, rcNarrow.right - rcNarrow.left, rcNarrow.bottom - rcNarrow.top, SWP_NOZORDER | SWP_FRAMECHANGED);
-        CenterEditText(hTarget);
-        ShowWindow(hBrowse, SW_SHOW);
-        ShowWindow(GetDlgItem(m_hwnd, IDC_LBL_ARGS), SW_SHOW);
-        ShowWindow(GetDlgItem(m_hwnd, IDC_EDIT_ARGS), SW_SHOW);
-        ShowWindow(GetDlgItem(m_hwnd, IDC_CHECK_ADMIN), SW_SHOW);
+        showBrowse = true;
+        showArgs = true;
     }
+
+    HDWP hdwp = BeginDeferWindowPos(5);
+    if (hdwp) {
+        auto visFlag = [](bool visible) noexcept -> UINT {
+            return SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW);
+        };
+        hdwp = DeferWindowPos(hdwp, hBrowse, nullptr, 0, 0, 0, 0, visFlag(showBrowse));
+        if (hdwp) {
+            hdwp = DeferWindowPos(hdwp, hTarget, nullptr, rcTarget.left, rcTarget.top,
+                                  rcTarget.right - rcTarget.left, rcTarget.bottom - rcTarget.top,
+                                  SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+        if (hdwp) hdwp = DeferWindowPos(hdwp, hLblArgs, nullptr, 0, 0, 0, 0, visFlag(showArgs));
+        if (hdwp) hdwp = DeferWindowPos(hdwp, hEditArgs, nullptr, 0, 0, 0, 0, visFlag(showArgs));
+        if (hdwp) hdwp = DeferWindowPos(hdwp, hCheckAdmin, nullptr, 0, 0, 0, 0, visFlag(showAdmin));
+        if (hdwp) EndDeferWindowPos(hdwp);
+    }
+
+    CenterEditText(hTarget);
 }
 
 void SettingsWindow::SaveUIToConfig() {
     HWND hCombo = GetDlgItem(m_hwnd, IDC_COMBO_ACTION);
-    int sel = static_cast<int>(SendMessageW(hCombo, CB_GETCURSEL, 0, 0));
+    const int sel = static_cast<int>(SendMessageW(hCombo, CB_GETCURSEL, 0, 0));
     m_config.actionType = (sel == 1) ? L"OpenUrl" : ((sel == 2) ? L"RunCommand" : L"LaunchApp");
 
-    wchar_t targetBuf[2048] = { 0 };
-    GetDlgItemTextW(m_hwnd, IDC_EDIT_TARGET, targetBuf, 2048);
-    m_config.targetPath = targetBuf;
+    auto ReadDlgText = [this](int ctrlId, std::wstring& dest) {
+        HWND hCtrl = GetDlgItem(m_hwnd, ctrlId);
+        const int len = GetWindowTextLengthW(hCtrl);
+        if (len <= 0) {
+            dest.clear();
+            return;
+        }
+        dest.resize(static_cast<size_t>(len) + 1);
+        const int copied = GetWindowTextW(hCtrl, dest.data(), len + 1);
+        dest.resize(copied > 0 ? static_cast<size_t>(copied) : 0);
+    };
 
-    wchar_t argsBuf[2048] = { 0 };
-    GetDlgItemTextW(m_hwnd, IDC_EDIT_ARGS, argsBuf, 2048);
-    m_config.arguments = argsBuf;
+    ReadDlgText(IDC_EDIT_TARGET, m_config.targetPath);
+    ReadDlgText(IDC_EDIT_ARGS, m_config.arguments);
 
     m_config.runAsAdmin = (IsDlgButtonChecked(m_hwnd, IDC_CHECK_ADMIN) == BST_CHECKED);
     m_config.startWithWindows = (IsDlgButtonChecked(m_hwnd, IDC_CHECK_STARTUP) == BST_CHECKED);
 }
 
 void SettingsWindow::OnBrowse(HWND hwnd) {
-    wchar_t filename[MAX_PATH] = { 0 };
+    CoInitGuard co;
+    ComPtr<IFileOpenDialog> pDialog;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_IFileOpenDialog, pDialog.PutVoid()))) {
+        return;
+    }
 
-    OPENFILENAMEW ofn = { sizeof(ofn) };
-    ofn.hwndOwner = hwnd;
-    ofn.lpstrFilter = L"Applications & Shortcuts (*.exe;*.bat;*.cmd;*.lnk)\0*.exe;*.bat;*.cmd;*.lnk\0All Files (*.*)\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrTitle = L"Select Application or File";
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    static constexpr COMDLG_FILTERSPEC filters[] = {
+        { L"Applications & Shortcuts (*.exe;*.bat;*.cmd;*.lnk)", L"*.exe;*.bat;*.cmd;*.lnk" },
+        { L"All Files (*.*)", L"*.*" }
+    };
+    pDialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
+    pDialog->SetTitle(L"Select Application or File");
 
-    if (GetOpenFileNameW(&ofn)) {
-        SetDlgItemTextW(hwnd, IDC_EDIT_TARGET, filename);
-        CenterEditText(GetDlgItem(hwnd, IDC_EDIT_TARGET));
+    DWORD options = 0;
+    if (SUCCEEDED(pDialog->GetOptions(&options))) {
+        pDialog->SetOptions(options | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
+    }
+
+    if (SUCCEEDED(pDialog->Show(hwnd))) {
+        ComPtr<IShellItem> pItem;
+        if (SUCCEEDED(pDialog->GetResult(pItem.GetAddressOf())) && pItem) {
+            PWSTR pszFilePath = nullptr;
+            if (SUCCEEDED(pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszFilePath)) && pszFilePath) {
+                SetDlgItemTextW(hwnd, IDC_EDIT_TARGET, pszFilePath);
+                CenterEditText(GetDlgItem(hwnd, IDC_EDIT_TARGET));
+                CoTaskMemFree(pszFilePath);
+            }
+        }
     }
 }
 
 void SettingsWindow::OnCommand(HWND hwnd, WPARAM wParam, LPARAM /*lParam*/) {
-    WORD id = LOWORD(wParam);
-    WORD code = HIWORD(wParam);
+    const WORD id = LOWORD(wParam);
+    const WORD code = HIWORD(wParam);
 
     if (id == IDC_COMBO_ACTION && code == CBN_SELCHANGE) {
         UpdateTargetPrompt();
@@ -585,17 +653,20 @@ void SettingsWindow::OnCommand(HWND hwnd, WPARAM wParam, LPARAM /*lParam*/) {
     } else if (id == IDC_BTN_TEST) {
         SaveUIToConfig();
         ActionRunner::Execute(m_config);
-        SYSTEMTIME st;
+        SYSTEMTIME st = {};
         GetLocalTime(&st);
         wchar_t buf[128];
-        swprintf_s(buf, L"Test action triggered at %02d:%02d:%02d! Action executed.", st.wHour, st.wMinute, st.wSecond);
+        swprintf_s(buf, L"Test action triggered at %02u:%02u:%02u! Action executed.", st.wHour, st.wMinute, st.wSecond);
         SetDlgItemTextW(hwnd, IDC_STATUSBAR, buf);
-    } else if (id == IDOK) { // Save
+    } else if (id == IDOK) {
+        const bool prevStartup = m_config.startWithWindows;
         SaveUIToConfig();
         ConfigManager::Save(m_config);
-        ConfigManager::SetStartup(m_config.startWithWindows);
+        if (m_config.startWithWindows || prevStartup) {
+            ConfigManager::SetStartup(m_config.startWithWindows);
+        }
         MessageBoxW(hwnd, L"Settings saved.", L"Copilot Remapper", MB_OK | MB_ICONINFORMATION);
-    } else if (id == IDCANCEL) { // Close
+    } else if (id == IDCANCEL) {
         Hide();
     }
 }

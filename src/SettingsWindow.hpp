@@ -2,17 +2,22 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <atomic>
 #include "Config.hpp"
 
 class SettingsWindow {
 public:
-    SettingsWindow();
+    SettingsWindow() noexcept = default;
     ~SettingsWindow();
+
+    SettingsWindow(const SettingsWindow&) = delete;
+    SettingsWindow& operator=(const SettingsWindow&) = delete;
 
     void Show();
     void Hide();
-    bool IsVisible() const;
-    HWND GetHwnd() const { return m_hwnd; }
+    bool IsVisible() const noexcept;
+    static bool IsOpen() noexcept { return s_isOpen.load(std::memory_order_relaxed); }
+    HWND GetHwnd() const noexcept { return m_hwnd; }
     void OnCopilotKeyPressed();
     void Wakeup();
 
@@ -32,4 +37,5 @@ private:
 
     HWND m_hwnd = nullptr;
     AppConfig m_config;
+    static std::atomic<bool> s_isOpen;
 };

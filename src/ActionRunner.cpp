@@ -1,59 +1,14 @@
 #include "ActionRunner.hpp"
+#include "ComHelpers.hpp"
 #include "ProcessManager.hpp"
-#include "Config.hpp"
-#include <windows.h>
 #include <shellapi.h>
-#include <memory>
-#include <vector>
+#include <string>
 
-void ActionRunner::MaskStartMenu() {
-    INPUT inputs[2] = {};
-    inputs[0].type = INPUT_KEYBOARD;
-    inputs[0].ki.wVk = 0xE8; // VK_UNASSIGNED_E8 masks Windows Start Menu cleanly
-    inputs[1].type = INPUT_KEYBOARD;
-    inputs[1].ki.wVk = 0xE8;
-    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(2, inputs, sizeof(INPUT));
-}
+PTP_WORK ActionRunner::s_tpWork = nullptr;
 
-void ActionRunner::ReleaseModifiers() {
-    bool shiftDown = (GetKeyState(VK_LSHIFT) & 0x8000) || (GetAsyncKeyState(VK_LSHIFT) & 0x8000);
-    bool winDown = (GetKeyState(VK_LWIN) & 0x8000) || (GetAsyncKeyState(VK_LWIN) & 0x8000);
+namespace {
 
-    if (shiftDown || winDown) {
-        INPUT inputs[2] = {};
-        UINT count = 0;
-        if (shiftDown) {
-            inputs[count].type = INPUT_KEYBOARD;
-            inputs[count].ki.wVk = VK_LSHIFT;
-            inputs[count].ki.dwFlags = KEYEVENTF_KEYUP;
-            count++;
-        }
-        if (winDown) {
-            inputs[count].type = INPUT_KEYBOARD;
-            inputs[count].ki.wVk = VK_LWIN;
-            inputs[count].ki.dwFlags = KEYEVENTF_KEYUP;
-            count++;
-        }
-        SendInput(count, inputs, sizeof(INPUT));
-    }
-}
-
-std::wstring ActionRunner::ExpandEnv(const std::wstring& input) {
-    if (input.empty()) return L"";
-    if (input.find(L'%') == std::wstring::npos) return input;
-
-    DWORD needed = ExpandEnvironmentStringsW(input.c_str(), nullptr, 0);
-    if (needed == 0) return input;
-    std::wstring result(needed, 0);
-    ExpandEnvironmentStringsW(input.c_str(), &result[0], needed);
-    if (!result.empty() && result.back() == L'\0') {
-        result.pop_back();
-    }
-    return result;
-}
-
-static inline void LogDebugActivity(const wchar_t* msg) {
+inline void LogDebugActivity(const wchar_t* msg) noexcept {
 #ifdef _DEBUG
     OutputDebugStringW(L"[CopilotRemapper] ");
     OutputDebugStringW(msg);
@@ -63,102 +18,180 @@ static inline void LogDebugActivity(const wchar_t* msg) {
 #endif
 }
 
-VOID CALLBACK ActionRunner::ThreadPoolActionCallback(PTP_CALLBACK_INSTANCE /*Instance*/, PVOID Context) {
-    std::unique_ptr<AppConfig> pCfg(static_cast<AppConfig*>(Context));
-    if (!pCfg) return;
+} // namespace
 
-    try {
-        const AppConfig& cfg = *pCfg;
-        std::wstring target = ExpandEnv(cfg.targetPath);
-        std::wstring args = ExpandEnv(cfg.arguments);
-        std::wstring workDir = ExpandEnv(cfg.workingDirectory);
-        LPCWSTR lpWorkDir = workDir.empty() ? nullptr : workDir.c_str();
+void ActionRunner::Initialize() noexcept {
+    if (!s_tpWork) {
+        s_tpWork = CreateThreadpoolWork(SavedWorkCallback, nullptr, nullptr);
+    }
+}
 
-        if (cfg.actionType == L"OpenUrl") {
-            ReleaseModifiers();
-            if (target.find(L"://") == std::wstring::npos) {
-                target = L"https://" + target;
-            }
-            LogDebugActivity((L"OpenUrl: " + target).c_str());
-            ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        } else if (cfg.actionType == L"RunCommand") {
-            ReleaseModifiers();
-            std::wstring cmd = L"-NoProfile -ExecutionPolicy Bypass -Command \"" + target + L"\"";
-            SHELLEXECUTEINFOW sei = { sizeof(sei) };
-            sei.fMask = cfg.runAsAdmin ? 0 : SEE_MASK_FLAG_NO_UI;
-            sei.lpVerb = cfg.runAsAdmin ? L"runas" : L"open";
-            sei.lpFile = L"powershell.exe";
-            sei.lpParameters = cmd.c_str();
-            sei.lpDirectory = lpWorkDir;
-            sei.nShow = SW_HIDE;
-            LogDebugActivity((L"RunCommand: " + target).c_str());
-            ShellExecuteExW(&sei);
+void ActionRunner::Shutdown() noexcept {
+    if (s_tpWork) {
+        WaitForThreadpoolWorkCallbacks(s_tpWork, TRUE);
+        CloseThreadpoolWork(s_tpWork);
+        s_tpWork = nullptr;
+    }
+}
+
+void ActionRunner::MaskStartMenu() noexcept {
+    INPUT inputs[2] = {};
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = 0xE8; // VK_UNASSIGNED_E8 masks Windows Start Menu cleanly
+    inputs[1].type = INPUT_KEYBOARD;
+    inputs[1].ki.wVk = 0xE8;
+    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(2, inputs, sizeof(INPUT));
+}
+
+void ActionRunner::ReleaseModifiers() noexcept {
+    const bool shiftDown = (GetAsyncKeyState(VK_LSHIFT) & 0x8000) != 0;
+    const bool winDown = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0;
+
+    if (!shiftDown && !winDown) return;
+
+    INPUT inputs[2] = {};
+    UINT count = 0;
+    if (shiftDown) {
+        inputs[count].type = INPUT_KEYBOARD;
+        inputs[count].ki.wVk = VK_LSHIFT;
+        inputs[count].ki.dwFlags = KEYEVENTF_KEYUP;
+        ++count;
+    }
+    if (winDown) {
+        inputs[count].type = INPUT_KEYBOARD;
+        inputs[count].ki.wVk = VK_LWIN;
+        inputs[count].ki.dwFlags = KEYEVENTF_KEYUP;
+        ++count;
+    }
+    SendInput(count, inputs, sizeof(INPUT));
+}
+
+void ActionRunner::ExecuteResolved(const ResolvedConfig& rc) {
+    if (rc.expandedTarget.empty()) return;
+
+    const wchar_t* lpWorkDir = rc.expandedWorkDir.empty() ? nullptr : rc.expandedWorkDir.c_str();
+
+    if (rc.isOpenUrl) {
+        ReleaseModifiers();
+        CoInitGuard co;
+
+        if (rc.expandedTarget.find(L"://") == std::wstring::npos) {
+            std::wstring url = L"https://" + rc.expandedTarget;
+            LogDebugActivity((L"OpenUrl: " + url).c_str());
+            ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         } else {
-            // LaunchApp
-            // 1. If target is already active in foreground, do nothing
-            if (ProcessManager::IsForegroundProcessTarget(target)) {
-                LogDebugActivity(L"Target application is already active in the foreground.");
-                return;
-            }
-
-            // 2. Search for existing running window
-            bool foundElevated = false;
-            HWND hExisting = ProcessManager::FindTargetWindow(target, cfg.runAsAdmin, foundElevated);
-
-            if (cfg.runAsAdmin) {
-                if (hExisting && foundElevated) {
-                    // Already elevated: bring to foreground directly without another UAC prompt
-                    LogDebugActivity(L"Found existing elevated instance. Bringing to foreground directly.");
-                    ReleaseModifiers();
-                    ProcessManager::ActivateWindow(hExisting);
-                    return;
-                }
-
-                // Not running elevated: display normal UAC confirmation prompt
-                LogDebugActivity(L"Prompting UAC to launch as administrator.");
-                ReleaseModifiers();
-                SHELLEXECUTEINFOW sei = { sizeof(sei) };
-                sei.fMask = 0;
-                sei.lpVerb = L"runas";
-                sei.lpFile = target.c_str();
-                sei.lpParameters = args.empty() ? nullptr : args.c_str();
-                sei.lpDirectory = lpWorkDir;
-                sei.nShow = SW_SHOWNORMAL;
-                ShellExecuteExW(&sei);
-                return;
-            } else {
-                if (hExisting) {
-                    // Standard instance found: bring to foreground without duplicate instance
-                    LogDebugActivity(L"Found existing instance. Bringing to foreground directly.");
-                    ReleaseModifiers();
-                    ProcessManager::ActivateWindow(hExisting);
-                    return;
-                }
-
-                // Launch standard instance
-                LogDebugActivity(L"Launching standard instance.");
-                ReleaseModifiers();
-                SHELLEXECUTEINFOW sei = { sizeof(sei) };
-                sei.fMask = SEE_MASK_FLAG_NO_UI;
-                sei.lpVerb = nullptr;
-                sei.lpFile = target.c_str();
-                sei.lpParameters = args.empty() ? nullptr : args.c_str();
-                sei.lpDirectory = lpWorkDir;
-                sei.nShow = SW_SHOWNORMAL;
-                ShellExecuteExW(&sei);
-                return;
-            }
+            LogDebugActivity((L"OpenUrl: " + rc.expandedTarget).c_str());
+            ShellExecuteW(nullptr, L"open", rc.expandedTarget.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         }
-    } catch (...) {
+        return;
+    }
+
+    if (rc.isRunCommand) {
+        ReleaseModifiers();
+        CoInitGuard co;
+
+        std::wstring cmd;
+        cmd.reserve(rc.expandedTarget.size() + 48);
+        cmd = L"-NoProfile -ExecutionPolicy Bypass -Command \"";
+        cmd += rc.expandedTarget;
+        cmd += L"\"";
+
+        SHELLEXECUTEINFOW sei = {};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = rc.config.runAsAdmin ? 0 : SEE_MASK_FLAG_NO_UI;
+        sei.lpVerb = rc.config.runAsAdmin ? L"runas" : L"open";
+        sei.lpFile = L"powershell.exe";
+        sei.lpParameters = cmd.c_str();
+        sei.lpDirectory = lpWorkDir;
+        sei.nShow = SW_HIDE;
+        LogDebugActivity((L"RunCommand: " + rc.expandedTarget).c_str());
+        ShellExecuteExW(&sei);
+        return;
+    }
+
+    // LaunchApp
+    if (ProcessManager::IsForegroundProcessTargetResolved(rc.targetExe, rc.cleanTarget)) {
+        LogDebugActivity(L"Target application is already active in the foreground.");
+        return;
+    }
+
+    bool foundElevated = false;
+    HWND hExisting = ProcessManager::FindTargetWindowResolved(rc.targetExe, rc.cleanTarget, rc.config.runAsAdmin, foundElevated);
+
+    if (rc.config.runAsAdmin) {
+        if (hExisting && foundElevated) {
+            LogDebugActivity(L"Found existing elevated instance. Bringing to foreground directly.");
+            ReleaseModifiers();
+            ProcessManager::ActivateWindow(hExisting);
+            return;
+        }
+
+        LogDebugActivity(L"Prompting UAC to launch as administrator.");
+        ReleaseModifiers();
+        CoInitGuard co;
+        SHELLEXECUTEINFOW sei = {};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = 0;
+        sei.lpVerb = L"runas";
+        sei.lpFile = rc.expandedTarget.c_str();
+        sei.lpParameters = rc.expandedArgs.empty() ? nullptr : rc.expandedArgs.c_str();
+        sei.lpDirectory = lpWorkDir;
+        sei.nShow = SW_SHOWNORMAL;
+        ShellExecuteExW(&sei);
+        return;
+    }
+
+    if (hExisting) {
+        LogDebugActivity(L"Found existing instance. Bringing to foreground directly.");
+        ReleaseModifiers();
+        ProcessManager::ActivateWindow(hExisting);
+        return;
+    }
+
+    LogDebugActivity(L"Launching standard instance.");
+    ReleaseModifiers();
+    CoInitGuard co;
+    SHELLEXECUTEINFOW sei = {};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = nullptr;
+    sei.lpFile = rc.expandedTarget.c_str();
+    sei.lpParameters = rc.expandedArgs.empty() ? nullptr : rc.expandedArgs.c_str();
+    sei.lpDirectory = lpWorkDir;
+    sei.nShow = SW_SHOWNORMAL;
+    ShellExecuteExW(&sei);
+}
+
+VOID CALLBACK ActionRunner::SavedWorkCallback(PTP_CALLBACK_INSTANCE /*Instance*/, PVOID /*Context*/, PTP_WORK /*Work*/) {
+    RefPtr<const ResolvedConfig> snap = ConfigManager::GetResolvedSnapshot();
+    if (snap) {
+        ExecuteResolved(*snap);
+    }
+}
+
+VOID CALLBACK ActionRunner::AdHocWorkCallback(PTP_CALLBACK_INSTANCE /*Instance*/, PVOID Context) {
+    RefPtr<const ResolvedConfig> pResolved(static_cast<const ResolvedConfig*>(Context));
+    if (pResolved) {
+        ExecuteResolved(*pResolved);
+    }
+}
+
+void ActionRunner::ExecuteSaved() noexcept {
+    if (!ConfigManager::HasTarget()) return;
+
+    if (s_tpWork) {
+        SubmitThreadpoolWork(s_tpWork);
+    } else {
+        SavedWorkCallback(nullptr, nullptr, nullptr);
     }
 }
 
 void ActionRunner::Execute(const AppConfig& config) {
     if (config.targetPath.empty()) return;
 
-    auto* pContext = new AppConfig(config);
-    if (!TrySubmitThreadpoolCallback(ThreadPoolActionCallback, pContext, nullptr)) {
-        // Fallback: run on caller or delete
-        ThreadPoolActionCallback(nullptr, pContext);
+    auto* pContext = new ResolvedConfig(ConfigManager::ResolveConfig(config));
+    if (!TrySubmitThreadpoolCallback(AdHocWorkCallback, pContext, nullptr)) {
+        AdHocWorkCallback(nullptr, pContext);
     }
 }

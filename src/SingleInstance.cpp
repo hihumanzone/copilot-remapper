@@ -1,12 +1,9 @@
 #include "SingleInstance.hpp"
 
-static const wchar_t* const MUTEX_NAME = L"Global\\CopilotRemapper_SingleInstance_Mutex";
-static const wchar_t* const EVENT_NAME = L"Global\\CopilotRemapper_Wakeup";
-static const wchar_t* const LOCAL_MUTEX_NAME = L"Local\\CopilotRemapper_SingleInstance_Mutex";
-static const wchar_t* const LOCAL_EVENT_NAME = L"Local\\CopilotRemapper_Wakeup";
-
-SingleInstance::SingleInstance() {
-}
+static constexpr wchar_t MUTEX_NAME[] = L"Global\\CopilotRemapper_SingleInstance_Mutex";
+static constexpr wchar_t EVENT_NAME[] = L"Global\\CopilotRemapper_Wakeup";
+static constexpr wchar_t LOCAL_MUTEX_NAME[] = L"Local\\CopilotRemapper_SingleInstance_Mutex";
+static constexpr wchar_t LOCAL_EVENT_NAME[] = L"Local\\CopilotRemapper_Wakeup";
 
 SingleInstance::~SingleInstance() {
     StopWakeupListener();
@@ -32,7 +29,7 @@ bool SingleInstance::TryAcquire() {
 }
 
 #ifndef ASFW_ANY
-#define ASFW_ANY ((DWORD)-1)
+#define ASFW_ANY (static_cast<DWORD>(-1))
 #endif
 
 void SingleInstance::SignalExistingInstance() {
@@ -51,13 +48,14 @@ VOID CALLBACK SingleInstance::WakeupWaitCallback(PVOID lpParameter, BOOLEAN Time
     if (!TimerOrWaitFired && lpParameter) {
         auto* pThis = static_cast<SingleInstance*>(lpParameter);
         if (pThis && pThis->m_onWakeup) {
-            pThis->m_onWakeup();
+            pThis->m_onWakeup(pThis->m_wakeupContext);
         }
     }
 }
 
-void SingleInstance::StartWakeupListener(std::function<void()> onWakeup) {
-    m_onWakeup = std::move(onWakeup);
+void SingleInstance::StartWakeupListener(WakeupCallback onWakeup, void* context) {
+    m_onWakeup = onWakeup;
+    m_wakeupContext = context;
 
     m_hWakeupEvent = CreateEventW(nullptr, FALSE, FALSE, EVENT_NAME);
     if (!m_hWakeupEvent && GetLastError() == ERROR_ACCESS_DENIED) {
@@ -86,4 +84,5 @@ void SingleInstance::StopWakeupListener() {
         m_hWakeupEvent = nullptr;
     }
     m_onWakeup = nullptr;
+    m_wakeupContext = nullptr;
 }

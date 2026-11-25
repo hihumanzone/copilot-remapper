@@ -1,8 +1,10 @@
 #include "TrayIcon.hpp"
 #include "../resource.h"
+#include <iterator>
 
-TrayIcon::TrayIcon(HWND messageHwnd, UINT callbackMsg)
+TrayIcon::TrayIcon(HWND messageHwnd, UINT callbackMsg) noexcept
     : m_hwnd(messageHwnd), m_callbackMsg(callbackMsg) {
+    m_nid.cbSize = sizeof(m_nid);
 }
 
 TrayIcon::~TrayIcon() {
@@ -21,21 +23,14 @@ bool TrayIcon::TryAdd() {
     m_nid.uCallbackMessage = m_callbackMsg;
     m_nid.hIcon = m_savedIcon;
 
-    if (!m_savedTooltip.empty()) {
-        wcsncpy_s(m_nid.szTip, m_savedTooltip.c_str(), _countof(m_nid.szTip) - 1);
+    if (m_savedTooltip[0] != L'\0') {
+        wcsncpy_s(m_nid.szTip, m_savedTooltip, std::size(m_nid.szTip) - 1);
     }
 
-    if (Shell_NotifyIconW(NIM_ADD, &m_nid)) {
+    if (Shell_NotifyIconW(NIM_ADD, &m_nid) || Shell_NotifyIconW(NIM_MODIFY, &m_nid)) {
         m_added = true;
         m_nid.uVersion = NOTIFYICON_VERSION_4;
         Shell_NotifyIconW(NIM_SETVERSION, &m_nid);
-        StopRetryTimer();
-        return true;
-    }
-
-    // If NIM_ADD failed, an icon entry might already linger from an earlier session, try NIM_MODIFY
-    if (Shell_NotifyIconW(NIM_MODIFY, &m_nid)) {
-        m_added = true;
         StopRetryTimer();
         return true;
     }
@@ -61,7 +56,11 @@ bool TrayIcon::Add(HICON hIcon, const wchar_t* tooltip) {
     if (m_added) Remove();
 
     m_savedIcon = hIcon;
-    m_savedTooltip = tooltip ? tooltip : L"";
+    if (tooltip && tooltip[0] != L'\0') {
+        wcsncpy_s(m_savedTooltip, tooltip, std::size(m_savedTooltip) - 1);
+    } else {
+        m_savedTooltip[0] = L'\0';
+    }
     m_retryCount = 0;
 
     if (TryAdd()) {
@@ -69,7 +68,6 @@ bool TrayIcon::Add(HICON hIcon, const wchar_t* tooltip) {
     }
 
     // Initial add failed (likely Windows Explorer taskbar still initializing).
-    // Start retry timer to poll every 1 second until Explorer is ready.
     StartRetryTimer();
     return false;
 }
@@ -83,8 +81,6 @@ void TrayIcon::Remove() {
 }
 
 void TrayIcon::OnTaskbarCreated() {
-    // When Explorer restarts or finishes initializing, it broadcasts TaskbarCreated.
-    // Re-add our notification icon.
     m_added = false;
     m_retryCount = 0;
     if (!TryAdd()) {
@@ -93,12 +89,11 @@ void TrayIcon::OnTaskbarCreated() {
 }
 
 void TrayIcon::OnRetryTimer() {
-    m_retryCount++;
+    ++m_retryCount;
     if (TryAdd()) {
         StopRetryTimer();
         return;
     }
-    // Stop after 60 seconds of retries to avoid indefinite polling if Explorer is absent
     if (m_retryCount >= 60) {
         StopRetryTimer();
     }
@@ -112,8 +107,8 @@ void TrayIcon::EnsureAdded() {
     }
 }
 
-void TrayIcon::HandleMessage(WPARAM wParam, LPARAM lParam) {
-    UINT msg = LOWORD(lParam);
+void TrayIcon::HandleMessage(WPARAM /*wParam*/, LPARAM lParam) {
+    const UINT msg = LOWORD(lParam);
     switch (msg) {
     case WM_RBUTTONUP:
     case WM_CONTEXTMENU:
@@ -125,7 +120,7 @@ void TrayIcon::HandleMessage(WPARAM wParam, LPARAM lParam) {
     case NIN_SELECT:
     case NIN_KEYSELECT:
         if (m_onSettings) {
-            m_onSettings();
+            m_onSettings(m_onSettingsCtx);
         }
         break;
 
@@ -140,7 +135,7 @@ void TrayIcon::ShowContextMenu() {
 
     HMENU hSubMenu = GetSubMenu(hMenu, 0);
     if (hSubMenu) {
-        POINT pt;
+        POINT pt = {};
         GetCursorPos(&pt);
         SetForegroundWindow(m_hwnd);
 
@@ -153,9 +148,9 @@ void TrayIcon::ShowContextMenu() {
         PostMessageW(m_hwnd, WM_NULL, 0, 0);
 
         if (cmd == IDM_TRAY_SETTINGS && m_onSettings) {
-            m_onSettings();
+            m_onSettings(m_onSettingsCtx);
         } else if (cmd == IDM_TRAY_EXIT && m_onExit) {
-            m_onExit();
+            m_onExit(m_onExitCtx);
         }
     }
     DestroyMenu(hMenu);
